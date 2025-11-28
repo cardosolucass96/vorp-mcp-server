@@ -443,7 +443,7 @@ export default {
       const auth = validateAuth(request);
       if (!auth.valid || !auth.kommoBaseUrl || !auth.kommoAccessToken) {
         return new Response(
-          JSON.stringify({ error: "Unauthorized. Use Bearer M0ra1s#3013|subdomain|kommoToken" }),
+          JSON.stringify({ error: "Unauthorized" }),
           { status: 401, headers: { "Content-Type": "application/json", ...corsHeaders } }
         );
       }
@@ -511,7 +511,7 @@ export default {
     const auth = validateAuth(request);
     if (!auth.valid || !auth.kommoBaseUrl || !auth.kommoAccessToken) {
       return new Response(
-        JSON.stringify({ error: true, message: "Unauthorized. Use Bearer M0ra1s#3013|subdomain|kommoToken" }),
+        JSON.stringify({ error: true, message: "Unauthorized" }),
         { status: 401, headers: { "Content-Type": "application/json", ...corsHeaders } }
       );
     }
