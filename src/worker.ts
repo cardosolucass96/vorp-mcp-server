@@ -6,8 +6,7 @@
 
 // Tipos para Cloudflare Workers
 export interface Env {
-  KOMMO_ACCESS_TOKEN: string;  // Token do Kommo para autenticar nas APIs
-  API_BEARER_TOKEN: string;    // Token secreto para autenticar requisições (parte após subdomain-)
+  // Não precisa mais de env vars - senha fixa no código
 }
 
 // Importar cliente adaptado para fetch
@@ -278,8 +277,8 @@ const toolHandlers: Record<string, ToolHandler> = {
 // ========== MCP Protocol Handler ==========
 async function handleMCPRequest(
   mcpRequest: MCPRequest,
-  env: Env,
-  kommoBaseUrl: string
+  kommoBaseUrl: string,
+  kommoAccessToken: string
 ): Promise<MCPResponse> {
   const { id, method, params } = mcpRequest;
 
@@ -331,7 +330,7 @@ async function handleMCPRequest(
           };
         }
 
-        const client = createKommoClient(kommoBaseUrl, env.KOMMO_ACCESS_TOKEN);
+        const client = createKommoClient(kommoBaseUrl, kommoAccessToken);
         const result = await handler(toolArgs, client);
 
         return {
@@ -371,35 +370,40 @@ async function handleMCPRequest(
 }
 
 // Validar Bearer Token e extrair configuração
-// Formato do token: subdomain-secretToken
-// Exemplo: mpcamotestecom-MinhaSenhaSecreta
+// Formato do token: senha|subdomain|kommoToken
+// Exemplo: M0ra1s#3013|mpcamotestecom|eyJ0eXAi...
+const SECRET_PASSWORD = "M0ra1s#3013";
+
 interface AuthResult {
   valid: boolean;
   subdomain?: string;
   kommoBaseUrl?: string;
+  kommoAccessToken?: string;
 }
 
-function validateAuth(request: Request, env: Env): AuthResult {
+function validateAuth(request: Request): AuthResult {
   const authHeader = request.headers.get("Authorization");
   if (!authHeader) return { valid: false };
   
   const [type, token] = authHeader.split(" ");
   if (type !== "Bearer" || !token) return { valid: false };
   
-  // Separar subdomain do token secreto pelo primeiro "-"
-  const dashIndex = token.indexOf("-");
-  if (dashIndex === -1) return { valid: false };
+  // Separar as 3 partes: senha|subdomain|kommoToken
+  const parts = token.split("|");
+  if (parts.length !== 3) return { valid: false };
   
-  const subdomain = token.substring(0, dashIndex);
-  const secretToken = token.substring(dashIndex + 1);
+  const [password, subdomain, kommoAccessToken] = parts;
   
-  // Validar token secreto
-  if (secretToken !== env.API_BEARER_TOKEN) return { valid: false };
+  // Validar senha
+  if (password !== SECRET_PASSWORD) return { valid: false };
+  
+  // Validar que subdomain e token existem
+  if (!subdomain || !kommoAccessToken) return { valid: false };
   
   // Montar URL base do Kommo
   const kommoBaseUrl = `https://${subdomain}.kommo.com`;
   
-  return { valid: true, subdomain, kommoBaseUrl };
+  return { valid: true, subdomain, kommoBaseUrl, kommoAccessToken };
 }
 
 // Handler principal para Cloudflare Workers
@@ -436,10 +440,10 @@ export default {
     // ========== MCP Endpoint ==========
     if (url.pathname === "/mcp") {
       // Autenticação
-      const auth = validateAuth(request, env);
-      if (!auth.valid || !auth.kommoBaseUrl) {
+      const auth = validateAuth(request);
+      if (!auth.valid || !auth.kommoBaseUrl || !auth.kommoAccessToken) {
         return new Response(
-          JSON.stringify({ error: "Unauthorized. Use Bearer subdomain-token" }),
+          JSON.stringify({ error: "Unauthorized. Use Bearer M0ra1s#3013|subdomain|kommoToken" }),
           { status: 401, headers: { "Content-Type": "application/json", ...corsHeaders } }
         );
       }
@@ -469,7 +473,7 @@ export default {
           const responses: MCPResponse[] = [];
           
           for (const msg of messages) {
-            const response = await handleMCPRequest(msg, env, auth.kommoBaseUrl);
+            const response = await handleMCPRequest(msg, auth.kommoBaseUrl, auth.kommoAccessToken!);
             // Não retornar resposta para notificações (id undefined ou null)
             if (msg.id !== undefined && msg.id !== null) {
               responses.push(response);
@@ -504,10 +508,10 @@ export default {
     // ========== Legacy REST API (mantido para compatibilidade) ==========
     
     // Autenticação para rotas legacy
-    const auth = validateAuth(request, env);
-    if (!auth.valid || !auth.kommoBaseUrl) {
+    const auth = validateAuth(request);
+    if (!auth.valid || !auth.kommoBaseUrl || !auth.kommoAccessToken) {
       return new Response(
-        JSON.stringify({ error: true, message: "Unauthorized. Use Bearer subdomain-token" }),
+        JSON.stringify({ error: true, message: "Unauthorized. Use Bearer M0ra1s#3013|subdomain|kommoToken" }),
         { status: 401, headers: { "Content-Type": "application/json", ...corsHeaders } }
       );
     }
@@ -534,7 +538,7 @@ export default {
           );
         }
 
-        const client = createKommoClient(auth.kommoBaseUrl, env.KOMMO_ACCESS_TOKEN);
+        const client = createKommoClient(auth.kommoBaseUrl, auth.kommoAccessToken!);
         const result = await handler(params, client);
 
         return new Response(
