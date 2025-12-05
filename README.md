@@ -70,6 +70,24 @@ docker run -d \
 docker logs -f kommo-mcp-server
 ```
 
+## ☁️ Deploy no Coolify
+
+Coolify é uma plataforma self-hosted (alternativa ao Heroku/Vercel).
+
+**Quick start:**
+
+1. No Coolify: **+ New Resource** → **Public Repository**
+2. Repository: `https://github.com/cardosolucass96/kommo-mcp-server`
+3. Build Pack: **Dockerfile**
+4. Environment Variables:
+   ```
+   PORT=3000
+   MCP_PASSWORD=M0ra1s#3013
+   ```
+5. **Deploy**
+
+📖 Veja guia completo em [COOLIFY.md](./COOLIFY.md)
+
 ## 🐧 Deploy no Ubuntu
 
 Veja documentação completa em [DEPLOY.md](./DEPLOY.md)
