@@ -70,59 +70,59 @@ function setCache(key: string, data: unknown, ttlSeconds: number = 600) {
 const toolDefinitions: MCPToolDefinition[] = [
   {
     name: "kommo_list_leads",
-    description: "Lista leads do Kommo CRM. Use para buscar leads por nome ou listar todos.",
+    description: "Lista leads do Kommo CRM. Use para buscar leads por nome, telefone ou listar todos. IMPORTANTE: Sempre use esta tool ANTES de atualizar um lead para obter o lead_id correto.",
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Texto para buscar no nome do lead" },
-        limit: { type: "number", description: "Quantidade de resultados (padrão: 10)" },
+        query: { type: "string", description: "Texto para buscar no nome do lead ou telefone" },
+        limit: { type: "number", description: "Quantidade de resultados (padrão: 10, máximo: 250)" },
         page: { type: "number", description: "Página para paginação (padrão: 1)" },
       },
     },
   },
   {
     name: "kommo_update_lead",
-    description: "Atualiza um lead específico. Pode alterar nome, preço ou status.",
+    description: "Atualiza um lead específico (nome, preço, status ou campos customizados). FLUXO OBRIGATÓRIO: 1) Use kommo_list_leads para encontrar o lead_id. 2) Se precisar mudar status, use kommo_list_pipelines para obter status_id. 3) Se precisar atualizar campos customizados, use kommo_list_lead_custom_fields para obter field_id e enums. IMPORTANTE: Cada CRM tem campos diferentes, sempre consulte os campos disponíveis antes de atualizar.",
     inputSchema: {
       type: "object",
       properties: {
-        lead_id: { type: "number", description: "ID do lead a ser atualizado" },
+        lead_id: { type: "number", description: "ID do lead (obtenha com kommo_list_leads)" },
         name: { type: "string", description: "Novo nome do lead" },
-        price: { type: "number", description: "Novo preço/valor do lead" },
-        status_id: { type: "number", description: "ID do novo status/estágio" },
+        price: { type: "number", description: "Novo preço/valor do lead em número (ex: 1500.50)" },
+        status_id: { type: "number", description: "ID do novo status (obtenha com kommo_list_pipelines)" },
       },
       required: ["lead_id"],
     },
   },
   {
     name: "kommo_add_notes",
-    description: "Adiciona uma nota/observação a um lead.",
+    description: "Adiciona nota/observação a um lead no Kommo CRM. WORKFLOW: 1) Use kommo_list_leads para obter o lead_id. 2) Passe o lead_id e texto da nota. A nota será registrada no histórico do lead, visível para toda a equipe. Use para documentar ligações, reuniões, acordos ou qualquer informação relevante sobre o lead.",
     inputSchema: {
       type: "object",
       properties: {
-        lead_id: { type: "number", description: "ID do lead" },
-        text: { type: "string", description: "Texto da nota" },
+        lead_id: { type: "number", description: "ID do lead (obtenha com kommo_list_leads)" },
+        text: { type: "string", description: "Texto da nota. Exemplo: 'Cliente confirmou interesse no produto X'" },
       },
       required: ["lead_id", "text"],
     },
   },
   {
     name: "kommo_add_tasks",
-    description: "Cria uma tarefa para um lead. Tipos: 1=Ligar, 2=Reunião, 3=Email.",
+    description: "Cria tarefa/lembrete para um lead no Kommo CRM. WORKFLOW: 1) Use kommo_list_leads para obter lead_id. 2) Defina complete_till em Unix timestamp (exemplo: para amanhã use Date.now()/1000 + 86400). 3) Escolha task_type_id: 1=Ligar, 2=Reunião, 3=Escrever Email. A tarefa aparecerá no calendário do responsável pelo lead. IMPORTANTE: complete_till deve ser timestamp futuro em segundos (não milissegundos).",
     inputSchema: {
       type: "object",
       properties: {
-        lead_id: { type: "number", description: "ID do lead" },
-        text: { type: "string", description: "Descrição da tarefa" },
-        complete_till: { type: "number", description: "Prazo em Unix timestamp" },
-        task_type_id: { type: "number", description: "Tipo: 1=Ligar, 2=Reunião, 3=Email" },
+        lead_id: { type: "number", description: "ID do lead (obtenha com kommo_list_leads)" },
+        text: { type: "string", description: "Descrição da tarefa. Exemplo: 'Ligar para confirmar proposta'" },
+        complete_till: { type: "number", description: "Prazo Unix timestamp em segundos. Amanhã = Math.floor(Date.now()/1000) + 86400" },
+        task_type_id: { type: "number", description: "Tipo da tarefa: 1=Ligar (padrão), 2=Reunião, 3=Escrever Email" },
       },
       required: ["lead_id", "text", "complete_till"],
     },
   },
   {
     name: "kommo_list_pipelines",
-    description: "Lista todos os pipelines (funis) e seus estágios.",
+    description: "Lista TODOS os pipelines (funis de venda) do Kommo CRM com seus estágios. USE quando precisar descobrir quais status_id existem para mover leads entre etapas do funil. RETORNA para cada pipeline: pipeline_id, nome, e lista completa de estágios com (status_id, nome, cor, ordem, tipo). WORKFLOW: 1) Chame esta tool sem parâmetros. 2) Encontre o pipeline desejado (ex: 'Vendas', 'Cobrança'). 3) Anote o status_id do estágio destino. 4) Use esse status_id em kommo_update_lead. Resultados são cacheados por 10 minutos.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -130,13 +130,21 @@ const toolDefinitions: MCPToolDefinition[] = [
   },
   {
     name: "kommo_list_pipeline_stages",
-    description: "Lista os estágios de um pipeline específico.",
+    description: "Lista estágios de UM pipeline específico (alternativa mais focada ao kommo_list_pipelines). USE quando já souber o pipeline_id e quiser apenas os estágios daquele funil. RETORNA: lista de estágios com status_id, nome, cor, ordem e tipo. QUANDO USAR: Se não souber o pipeline_id, use kommo_list_pipelines primeiro para ver todos os pipelines. Se já souber o ID, use esta tool para resultados mais diretos. Útil para descobrir status_id válidos antes de mover leads.",
     inputSchema: {
       type: "object",
       properties: {
-        pipeline_id: { type: "number", description: "ID do pipeline" },
+        pipeline_id: { type: "number", description: "ID do pipeline (obtenha com kommo_list_pipelines se necessário)" },
       },
       required: ["pipeline_id"],
+    },
+  },
+  {
+    name: "kommo_list_lead_custom_fields",
+    description: "Lista TODOS os campos customizados disponíveis para leads neste CRM específico. CRUCIAL: Cada CRM tem campos diferentes! Use esta tool para: 1) Descobrir quais campos existem (id, name, code, type). 2) Ver valores permitidos (enums) para campos de seleção. 3) Identificar campos obrigatórios (is_required). 4) Saber o tipo de dado esperado (text, numeric, select, multiselect, date, url, checkbox, etc). SEMPRE consulte esta tool antes de atualizar campos customizados, pois os IDs e estruturas variam entre CRMs diferentes.",
+    inputSchema: {
+      type: "object",
+      properties: {},
     },
   },
 ];
@@ -263,6 +271,42 @@ const toolHandlers: Record<string, ToolHandler> = {
     }));
 
     setCache(cacheKey, formatted, 600);
+    return formatted;
+  },
+
+  kommo_list_lead_custom_fields: async (_params, client) => {
+    const cacheKey = "lead_custom_fields";
+    const cached = getCached<unknown>(cacheKey);
+    if (cached) return cached;
+
+    const response = await client.get<any>("/leads/custom_fields");
+    const fields = response._embedded?.custom_fields || [];
+
+    const formatted = fields.map((f: any) => ({
+      id: f.id,
+      name: f.name,
+      type: f.type,
+      code: f.code || null,
+      sort: f.sort,
+      entity_type: f.entity_type,
+      is_required: f.is_required || false,
+      is_predefined: f.is_predefined || false,
+      is_deletable: f.is_deletable || false,
+      is_api_only: f.is_api_only || false,
+      group_id: f.group_id || null,
+      remind: f.remind || null,
+      enums: f.enums?.map((e: any) => ({
+        id: e.id,
+        value: e.value,
+        sort: e.sort,
+      })) || null,
+      required_statuses: f.required_statuses?.map((rs: any) => ({
+        status_id: rs.status_id,
+        pipeline_id: rs.pipeline_id,
+      })) || null,
+    }));
+
+    setCache(cacheKey, formatted, 3600); // Cache por 1 hora
     return formatted;
   },
 };
