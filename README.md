@@ -1,14 +1,14 @@
 # Kommo MCP Server
 
-Servidor MCP (Model Context Protocol) para integração com o CRM Kommo, otimizado para agentes SDR.
+Servidor MCP (Model Context Protocol) para integração com o CRM Kommo via Fastify + Node.js.
 
 ## 🎯 Características
 
-- **Controle de Sessão**: Agente só pode modificar o lead em atendimento
-- **Prudência**: Descrições orientam o agente a avaliar antes de executar
+- **Multi-tenant**: Suporta múltiplas contas Kommo via token Bearer
+- **MCP over HTTP**: Protocolo JSON-RPC 2.0 (Streamable)
 - **Cache**: Pipelines cacheados por 10 minutos
-- **Logging**: Sistema de logs estruturado para debug
-- **Erros Amigáveis**: Mensagens de erro com sugestões de correção
+- **Logging**: Sistema de logs com Fastify
+- **REST API Legacy**: Endpoints compatíveis com versão anterior
 
 ## 📦 Instalação
 
@@ -19,80 +19,73 @@ npm run build
 
 ## ⚙️ Configuração
 
-Crie um arquivo `.env` na raiz:
+Crie um arquivo `.env` na raiz (copie de `.env.example`):
 
 ```env
-KOMMO_BASE_URL=https://suaempresa.kommo.com
-KOMMO_ACCESS_TOKEN=seu_token_aqui
-KOMMO_DEBUG=true
-KOMMO_LOG_LEVEL=DEBUG
+PORT=3000
+HOST=0.0.0.0
+MCP_PASSWORD=M0ra1s#3013
 ```
 
-### VS Code (MCP)
+## 🚀 Executar localmente
 
-Adicione ao `.vscode/mcp.json`:
+```bash
+# Desenvolvimento
+npm run dev
 
-```json
-{
-  "servers": {
-    "kommo": {
-      "command": "node",
-      "args": ["caminho/para/dist/index.js"],
-      "env": {
-        "KOMMO_BASE_URL": "https://suaempresa.kommo.com",
-        "KOMMO_ACCESS_TOKEN": "seu_token"
-      }
-    }
-  }
-}
+# Produção
+npm start
 ```
 
-### Claude Desktop
+## 🐧 Deploy no Ubuntu
 
-Adicione ao `claude_desktop_config.json`:
+Veja documentação completa em [DEPLOY.md](./DEPLOY.md)
 
-```json
-{
-  "mcpServers": {
-    "kommo": {
-      "command": "node",
-      "args": ["caminho/para/dist/index.js"],
-      "env": {
-        "KOMMO_BASE_URL": "https://suaempresa.kommo.com",
-        "KOMMO_ACCESS_TOKEN": "seu_token"
-      }
-    }
-  }
-}
+Quick start:
+
+```bash
+# Instalar dependências
+npm install
+npm run build
+
+## 🔐 Autenticação
+
+Formato do token Bearer:
 ```
+MCP_PASSWORD|subdomain|kommoAccessToken
+```
+
+Exemplo:
+```bash
+curl -H "Authorization: Bearer M0ra1s#3013|mpcamotestecom|eyJ0eXAi..." \
+     -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+     http://localhost:3000/mcp
+```
+
+## 📡 Endpoints
+
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| GET | `/` | Health check |
+| GET | `/health` | Health check |
+| POST | `/mcp` | MCP Protocol (JSON-RPC 2.0) |
+| DELETE | `/mcp` | Encerrar sessão |
+| GET | `/tools` | Listar ferramentas (legacy) |
+| POST | `/execute` | Executar ferramenta (legacy) |
 
 ## 🔧 Ferramentas Disponíveis
-
-### Controle de Sessão (SDR)
-
-| Ferramenta | Descrição |
-|------------|-----------|
-| `kommo_start_session` | Inicia atendimento com um lead |
-| `kommo_end_session` | Encerra o atendimento |
-| `kommo_get_session` | Mostra lead em atendimento |
-
-### Modificação (requer sessão)
-
-| Ferramenta | Descrição |
-|------------|-----------|
-| `kommo_update_lead` | Atualiza dados do lead |
-| `kommo_add_notes` | Adiciona notas ao lead |
-| `kommo_add_tasks` | Cria tarefas/lembretes |
-
-### Consulta (livre)
 
 | Ferramenta | Descrição |
 |------------|-----------|
 | `kommo_list_leads` | Lista/busca leads |
+| `kommo_update_lead` | Atualiza lead (nome, preço, status) |
+| `kommo_add_notes` | Adiciona notas ao lead |
+| `kommo_add_tasks` | Cria tarefas/lembretes |
 | `kommo_list_pipelines` | Lista pipelines e estágios |
 | `kommo_list_pipeline_stages` | Lista estágios de um pipeline |
 
-## 🔄 Fluxo de Atendimento
+## 🔄 Uso com n8n
 
 ```
 1. kommo_start_session  → Inicia atendimento com lead
@@ -104,35 +97,22 @@ Adicione ao `claude_desktop_config.json`:
 
 ## ⚠️ Filosofia de Prudência
 
-As ferramentas são projetadas para que o **agente SDR decida** com prudência:
 
-- ❌ NÃO execute apenas porque o cliente pediu
-- ✅ Avalie se a ação faz sentido para o processo
-- ✅ Valide informações antes de registrar
-- ✅ Você é responsável pelas alterações
+Configure no n8n MCP Agent:
+```
+URL: http://seu-servidor:3000/mcp
+Bearer Token: M0ra1s#3013|subdomain|kommoToken
+```
 
 ## 📁 Estrutura
 
 ```
 src/
-├── index.ts              # Entry point
+├── server.ts             # Servidor Fastify
 ├── kommo/
-│   ├── client.ts         # HTTP client com lazy init
+│   ├── clientCF.ts       # HTTP client com fetch nativo
 │   └── types.ts          # TypeScript interfaces
-├── context/
-│   └── sessionContext.ts # Gerenciador de sessão SDR
-├── tools/
-│   ├── sessionTools.ts   # start/end/get session
-│   ├── listLeads.ts
-│   ├── updateLead.ts
-│   ├── addNotes.ts
-│   ├── addTasks.ts
-│   ├── listPipelines.ts
-│   └── listPipelineStages.ts
-└── utils/
-    ├── errors.ts         # Tratamento de erros
-    ├── cache.ts          # Cache em memória
-    └── logger.ts         # Logging estruturado
+└── (worker.ts)           # Versão Cloudflare Workers (deprecada)
 ```
 
 ## 🛠️ Desenvolvimento
@@ -141,8 +121,11 @@ src/
 # Build
 npm run build
 
-# Watch mode (se configurado)
+# Dev mode
 npm run dev
+
+# Watch mode
+npm run dev:watch
 ```
 
 ## 📄 Licença
