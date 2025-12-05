@@ -37,6 +37,39 @@ npm run dev
 npm start
 ```
 
+## 🐳 Deploy com Docker
+
+### Opção 1: Docker Compose (Recomendado)
+
+```bash
+# Build e start
+docker-compose up -d
+
+# Ver logs
+docker-compose logs -f
+
+# Parar
+docker-compose down
+```
+
+### Opção 2: Docker direto
+
+```bash
+# Build da imagem
+docker build -t kommo-mcp-server .
+
+# Executar container
+docker run -d \
+  --name kommo-mcp-server \
+  -p 3000:3000 \
+  -e MCP_PASSWORD=M0ra1s#3013 \
+  --restart unless-stopped \
+  kommo-mcp-server
+
+# Ver logs
+docker logs -f kommo-mcp-server
+```
+
 ## 🐧 Deploy no Ubuntu
 
 Veja documentação completa em [DEPLOY.md](./DEPLOY.md)

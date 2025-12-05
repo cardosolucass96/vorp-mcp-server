@@ -1,6 +1,136 @@
-# Kommo MCP Server - Deploy Ubuntu com PM2
+# Kommo MCP Server - Deploy Ubuntu
 
-Este guia mostra como fazer deploy do Kommo MCP Server em um servidor Ubuntu usando PM2.
+Este guia mostra como fazer deploy do Kommo MCP Server em um servidor Ubuntu.
+
+## 🐳 Opção 1: Deploy com Docker (Recomendado)
+
+### Requisitos
+
+- Ubuntu 20.04+ ou Debian 11+
+- Docker instalado
+- Docker Compose instalado
+
+### 1. Instalar Docker
+
+```bash
+# Atualizar sistema
+sudo apt update
+sudo apt install -y ca-certificates curl gnupg
+
+# Adicionar chave GPG do Docker
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+# Adicionar repositório
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Instalar Docker
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# Verificar instalação
+docker --version
+docker compose version
+```
+
+### 2. Configurar usuário (opcional, mas recomendado)
+
+```bash
+# Adicionar usuário ao grupo docker (evita usar sudo)
+sudo usermod -aG docker $USER
+
+# Reiniciar sessão para aplicar
+newgrp docker
+```
+
+### 3. Clonar repositório e fazer deploy
+
+```bash
+cd /home/seu-usuario
+git clone https://github.com/cardosolucass96/kommo-mcp-server.git
+cd kommo-mcp-server
+
+# (Opcional) Configurar senha customizada
+echo "MCP_PASSWORD=SuaSenhaSecreta123" > .env
+
+# Build e start com docker compose
+docker compose up -d
+
+# Ver logs
+docker compose logs -f
+```
+
+### 4. Comandos úteis Docker
+
+```bash
+# Ver status
+docker compose ps
+
+# Ver logs
+docker compose logs -f
+
+# Parar
+docker compose down
+
+# Reiniciar
+docker compose restart
+
+# Atualizar (pull + rebuild + restart)
+git pull
+docker compose up -d --build
+
+# Ver uso de recursos
+docker stats kommo-mcp-server
+```
+
+### 5. Nginx como Proxy Reverso (Opcional)
+
+```bash
+sudo apt install nginx
+
+# Criar configuração
+sudo nano /etc/nginx/sites-available/kommo-mcp
+```
+
+Configuração nginx:
+
+```nginx
+server {
+    listen 80;
+    server_name seu-dominio.com;
+
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+```
+
+Ativar:
+```bash
+sudo ln -s /etc/nginx/sites-available/kommo-mcp /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+
+# SSL com Let's Encrypt
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d seu-dominio.com
+```
+
+---
+
+## 🔧 Opção 2: Deploy com PM2 (sem Docker)
 
 ## Requisitos
 
