@@ -82,7 +82,7 @@ const toolDefinitions: MCPToolDefinition[] = [
   },
   {
     name: "kommo_update_lead",
-    description: "Atualiza um lead específico (nome, preço, status ou campos customizados). FLUXO OBRIGATÓRIO: 1) Use kommo_list_leads para encontrar o lead_id. 2) Se precisar mudar status, use kommo_list_pipelines para obter status_id. 3) Se precisar atualizar campos customizados, use kommo_list_lead_custom_fields para obter field_id e enums. IMPORTANTE: Cada CRM tem campos diferentes, sempre consulte os campos disponíveis antes de atualizar.",
+    description: "Atualiza um lead específico (nome, preço, status ou campos customizados). FLUXO OBRIGATÓRIO: 1) Use kommo_list_leads para encontrar o lead_id. 2) Se precisar mudar status, use kommo_list_pipelines para obter status_id. 3) Se precisar atualizar campos customizados, use kommo_list_lead_custom_fields para obter field_id e enums. IMPORTANTE: Cada CRM tem campos diferentes, sempre consulte os campos disponíveis antes de atualizar. EXEMPLO para campo customizado: custom_fields_values: [{field_id: 1093415, values: [{value: 'texto'}]}]",
     inputSchema: {
       type: "object",
       properties: {
@@ -90,6 +90,28 @@ const toolDefinitions: MCPToolDefinition[] = [
         name: { type: "string", description: "Novo nome do lead" },
         price: { type: "number", description: "Novo preço/valor do lead em número (ex: 1500.50)" },
         status_id: { type: "number", description: "ID do novo status (obtenha com kommo_list_pipelines)" },
+        custom_fields_values: { 
+          type: "array", 
+          description: "Array de campos customizados. Cada item deve ter field_id (número) e values (array com objetos contendo value). Para campos select/multiselect, pode incluir enum_id também.",
+          items: {
+            type: "object",
+            properties: {
+              field_id: { type: "number", description: "ID do campo customizado (obtenha com kommo_list_lead_custom_fields)" },
+              values: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    value: { type: ["string", "number", "boolean"], description: "Valor do campo" },
+                    enum_id: { type: "number", description: "ID do enum (apenas para campos select/multiselect)" }
+                  },
+                  required: ["value"]
+                }
+              }
+            },
+            required: ["field_id", "values"]
+          }
+        },
       },
       required: ["lead_id"],
     },
@@ -169,11 +191,15 @@ const toolHandlers: Record<string, ToolHandler> = {
   },
 
   kommo_update_lead: async (params, client) => {
-    const { lead_id, name, price, status_id } = params as { 
+    const { lead_id, name, price, status_id, custom_fields_values } = params as { 
       lead_id: number;
       name?: string; 
       price?: number; 
       status_id?: number;
+      custom_fields_values?: Array<{
+        field_id: number;
+        values: Array<{ value: string | number | boolean; enum_id?: number }>;
+      }>;
     };
 
     if (!lead_id) throw new Error("lead_id é obrigatório");
@@ -182,6 +208,7 @@ const toolHandlers: Record<string, ToolHandler> = {
     if (name) body.name = name;
     if (price !== undefined) body.price = price;
     if (status_id) body.status_id = status_id;
+    if (custom_fields_values) body.custom_fields_values = custom_fields_values;
 
     return await client.patch<Lead>(`/leads/${lead_id}`, body);
   },
