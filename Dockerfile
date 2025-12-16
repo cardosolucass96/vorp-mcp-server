@@ -1,52 +1,57 @@
-# Build stage
+# ==========================================
+# Kommo MCP Server - Multi-stage Dockerfile
+# ==========================================
+
+# Stage 1: Build
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Copy package files
+# Copiar package files
 COPY package*.json ./
-COPY tsconfig.json ./
 
-# Install dependencies
+# Instalar dependências (incluindo devDependencies para build)
 RUN npm ci
 
-# Copy source code
-COPY src ./src
+# Copiar código fonte
+COPY tsconfig.json ./
+COPY src/ ./src/
 
 # Build TypeScript
 RUN npm run build
 
-# Production stage
-FROM node:20-alpine
+# Remover devDependencies
+RUN npm prune --production
+
+# ==========================================
+# Stage 2: Production
+FROM node:20-alpine AS production
+
+# Labels para GHCR
+LABEL org.opencontainers.image.source="https://github.com/cardosolucass96/kommo-mcp-server"
+LABEL org.opencontainers.image.description="Kommo MCP Server - Model Context Protocol for Kommo CRM"
+LABEL org.opencontainers.image.licenses="MIT"
+
+# Criar usuário não-root
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001
 
 WORKDIR /app
 
-# Install dumb-init for proper signal handling
-RUN apk add --no-cache dumb-init
+# Copiar apenas o necessário do builder
+COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
+COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
 
-# Copy package files
-COPY package*.json ./
-
-# Install production dependencies only
-RUN npm ci --only=production && npm cache clean --force
-
-# Copy built files from builder
-COPY --from=builder /app/dist ./dist
-
-# Create non-root user
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nodejs -u 1001 && \
-    chown -R nodejs:nodejs /app
-
+# Usar usuário não-root
 USER nodejs
 
-# Expose port
+# Expor porta
 EXPOSE 3000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
 
-# Start with dumb-init
-ENTRYPOINT ["dumb-init", "--"]
+# Comando de execução
 CMD ["node", "dist/server.js"]

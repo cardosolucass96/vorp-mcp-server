@@ -6,9 +6,12 @@ Servidor MCP (Model Context Protocol) para integração com o CRM Kommo via Fast
 
 - **Multi-tenant**: Suporta múltiplas contas Kommo via token Bearer
 - **MCP over HTTP**: Protocolo JSON-RPC 2.0 (Streamable)
-- **Cache**: Pipelines cacheados por 10 minutos
-- **Logging**: Sistema de logs com Fastify
-- **REST API Legacy**: Endpoints compatíveis com versão anterior
+- **Cache inteligente**: Pipelines e campos customizados cacheados
+- **Validação de entrada**: Schemas Zod para validação robusta de parâmetros
+- **Type-safe**: TypeScript com strict mode e tipagens completas
+- **Error handling**: Tratamento de erros estruturado com códigos JSON-RPC
+- **Logging**: Sistema de logs integrado com Fastify
+- **Segurança**: Validação de tokens, variáveis de ambiente obrigatórias
 
 ## 📦 Instalação
 
@@ -24,80 +27,46 @@ Crie um arquivo `.env` na raiz (copie de `.env.example`):
 ```env
 PORT=3000
 HOST=0.0.0.0
-MCP_PASSWORD=M0ra1s#3013
+MCP_PASSWORD=SuaSenhaSegura123
 ```
+
+⚠️ **IMPORTANTE**: 
+- `MCP_PASSWORD` é **OBRIGATÓRIO** - o servidor não inicia sem ele
+- Nunca use senhas fracas ou padrão em produção
+- Nunca commite o arquivo `.env` com credenciais reais
 
 ## 🚀 Executar localmente
 
 ```bash
-# Desenvolvimento
+# Desenvolvimento (inicia servidor + MCP Inspector)
 npm run dev
 
-# Produção
+# Apenas o servidor
 npm start
+
+# Build + Servidor (sem inspector)
+npm run build && npm start
+
+# Watch mode (recompila automaticamente)
+npm run dev:watch
+
+# Apenas MCP Inspector
+npm run inspector
 ```
-
-## 🐳 Deploy com Docker
-
-### Opção 1: Docker Compose (Recomendado)
-
-```bash
-# Build e start
-docker-compose up -d
-
-# Ver logs
-docker-compose logs -f
-
-# Parar
-docker-compose down
-```
-
-### Opção 2: Docker direto
-
-```bash
-# Build da imagem
-docker build -t kommo-mcp-server .
-
-# Executar container
-docker run -d \
-  --name kommo-mcp-server \
-  -p 3000:3000 \
-  -e MCP_PASSWORD=M0ra1s#3013 \
-  --restart unless-stopped \
-  kommo-mcp-server
-
-# Ver logs
-docker logs -f kommo-mcp-server
-```
-
-## ☁️ Deploy no Coolify
-
-Coolify é uma plataforma self-hosted (alternativa ao Heroku/Vercel).
-
-**Quick start:**
-
-1. No Coolify: **+ New Resource** → **Public Repository**
-2. Repository: `https://github.com/cardosolucass96/kommo-mcp-server`
-3. Build Pack: **Dockerfile**
-4. Environment Variables:
-   ```
-   PORT=3000
-   MCP_PASSWORD=M0ra1s#3013
-   ```
-5. **Deploy**
-
-📖 Veja guia completo em [COOLIFY.md](./COOLIFY.md)
-
-## 🐧 Deploy no Ubuntu
-
-Veja documentação completa em [DEPLOY.md](./DEPLOY.md)
 
 Quick start:
 
 ```bash
 # Instalar dependências
 npm install
+
+# Desenvolvimento (servidor + inspector)
+npm run dev
+
+# Produção
 npm run build
+npm start
+```
 
 ## 🔐 Autenticação
 
@@ -108,7 +77,7 @@ MCP_PASSWORD|subdomain|kommoAccessToken
 
 Exemplo:
 ```bash
-curl -H "Authorization: Bearer M0ra1s#3013|mpcamotestecom|eyJ0eXAi..." \
+curl -H "Authorization: Bearer Admin123|mpcamotestecom|eyJ0eXAi..." \
      -H "Content-Type: application/json" \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
      http://localhost:3000/mcp
@@ -127,14 +96,20 @@ curl -H "Authorization: Bearer M0ra1s#3013|mpcamotestecom|eyJ0eXAi..." \
 
 ## 🔧 Ferramentas Disponíveis
 
-| Ferramenta | Descrição |
-|------------|-----------|
-| `kommo_list_leads` | Lista/busca leads |
-| `kommo_update_lead` | Atualiza lead (nome, preço, status) |
-| `kommo_add_notes` | Adiciona notas ao lead |
-| `kommo_add_tasks` | Cria tarefas/lembretes |
-| `kommo_list_pipelines` | Lista pipelines e estágios |
-| `kommo_list_pipeline_stages` | Lista estágios de um pipeline |
+| Ferramenta | Descrição | Validação |
+|------------|-----------|-----------|
+| `kommo_list_leads` | Lista/busca leads | ✅ Zod schema |
+| `kommo_update_lead` | Atualiza lead (nome, preço, status, campos customizados) | ✅ Zod schema |
+| `kommo_add_notes` | Adiciona notas ao lead | ✅ Zod schema |
+| `kommo_add_tasks` | Cria tarefas/lembretes | ✅ Zod schema |
+| `kommo_list_pipelines` | Lista pipelines e estágios (cached) | - |
+| `kommo_list_pipeline_stages` | Lista estágios de um pipeline (cached) | ✅ Zod schema |
+| `kommo_list_lead_custom_fields` | Lista campos customizados (cached) | - |
+
+### Cache
+- **Pipelines**: 10 minutos
+- **Estágios**: 10 minutos
+- **Campos customizados**: 1 hora
 
 ## 🔄 Uso com n8n
 
@@ -146,25 +121,33 @@ curl -H "Authorization: Bearer M0ra1s#3013|mpcamotestecom|eyJ0eXAi..." \
 5. kommo_end_session    → Encerra atendimento
 ```
 
-## ⚠️ Filosofia de Prudência
+## ⚠️ Boas Práticas e Segurança
 
+### Segurança
+- ✅ Senha obrigatória via variável de ambiente
+- ✅ Validação de entrada com Zod schemas
+- ✅ Tokens multi-parte com validação
+- ✅ Error handling estruturado
+- ✅ Logs de erros com Fastify
 
-Configure no n8n MCP Agent:
-```
-URL: http://seu-servidor:3000/mcp
-Bearer Token: M0ra1s#3013|subdomain|kommoToken
-```
+### Desenvolvimento
+- ✅ TypeScript com strict mode
+- ✅ Tipagens completas (FastifyRequest, FastifyReply)
+- ✅ Constantes centralizadas em arquivo separado
+- ✅ Schemas de validação reutilizáveis
+- ✅ Cache configurável por TTL
 
-## 📁 Estrutura
+### Código Limpo
+- ✅ Separação de responsabilidades (types, schemas, constants)
+- ✅ Error codes padronizados (JSON-RPC 2.0)
+- ✅ Mensagens de erro descritivas
+- ✅ Validação early-return
 
-```
-src/
-├── server.ts             # Servidor Fastify
-├── kommo/
-│   ├── clientCF.ts       # HTTP client com fetch nativo
-│   └── types.ts          # TypeScript interfaces
-└── (worker.ts)           # Versão Cloudflare Workers (deprecada)
-```
+### Documentação
+- 📄 `README.md` - Visão geral e setup
+- 📄 `USAGE.md` - Exemplos práticos de uso com curl
+- 📄 `src/constants.ts` - Constantes e configurações
+- 📄 `src/schemas.ts` - Schemas de validação
 
 ## 🛠️ Desenvolvimento
 
@@ -178,7 +161,3 @@ npm run dev
 # Watch mode
 npm run dev:watch
 ```
-
-## 📄 Licença
-
-MIT
