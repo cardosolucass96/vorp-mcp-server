@@ -390,89 +390,6 @@ export interface UsersListResponse {
   };
 }
 
-// ==================== FILTERS ====================
-
-export interface LeadsFilter {
-  id?: number[];
-  pipeline_id?: number[];
-  status_id?: number[];
-  responsible_user_id?: number[];
-  created_at?: DateRange;
-  updated_at?: DateRange;
-  closed_at?: DateRange;
-}
-
-export interface DateRange {
-  from?: number;
-  to?: number;
-}
-
-export interface OrderBy {
-  field: "created_at" | "updated_at" | "id";
-  direction: "asc" | "desc";
-}
-
-// ==================== CONVERSATIONS ====================
-
-export interface Talk {
-  talk_id: number;
-  created_at: number;
-  updated_at: number;
-  rate: number;
-  contact_id: number;
-  chat_id: string;
-  entity_id: number | null;
-  entity_type: string | null;
-  status: "in_work" | "closed";
-  is_in_work: boolean;
-  is_read: boolean;
-  origin: string;
-  source_id: number;
-  account_id: number;
-  _links?: any;
-  _embedded?: {
-    contacts?: Array<{ id: number; _links?: any }>;
-    leads?: Array<{ id: number; _links?: any }>;
-    customers?: Array<any>;
-  };
-}
-
-export interface TalksListResponse {
-  _page: number;
-  _links: any;
-  _embedded: {
-    talks: Talk[];
-  };
-}
-
-export interface ConversationMessage {
-  id: string;
-  created_at: number;
-  author_id: number;
-  message_type: "text" | "picture" | "file" | "audio" | "video" | "sticker" | "system";
-  text: string | null;
-  attachment?: {
-    id: string;
-    type: string;
-    link: string;
-    media?: string;
-  };
-}
-
-export interface Conversation {
-  id: string;
-  chat_id: string;
-  created_at: number;
-  updated_at: number;
-  messages: ConversationMessage[];
-}
-
-export interface ConversationsListResponse {
-  _embedded: {
-    conversations: Conversation[];
-  };
-}
-
 // ==================== EVENTS ====================
 
 export interface KommoEvent {
@@ -504,12 +421,12 @@ export interface EventValue {
   note?: {
     id: number;
   };
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface EventsListResponse {
   _page: number;
-  _links: any;
+  _links: Links;
   _embedded: {
     events: KommoEvent[];
   };

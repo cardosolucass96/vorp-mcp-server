@@ -1,23 +1,33 @@
 /**
- * Kommo MCP Server - Fastify + Node.js
+ * Vorp MCP Server - Servidor MCP especializado para agente comercial do Grupo Vorp
+ * 
+ * 🎯 Grupo Vorp: Quatro empresas, um propósito - construir negócios fortes e escaláveis
+ * 
+ * FUNIS DISPONÍVEIS:
+ * - SDR: Leads da internet (inbound)
+ * - BDR: Prospecção ativa (outbound)
+ * - CLOSERS: Fechamento a partir de reunião
+ * 
+ * FONTES DE DADOS:
+ * - Kommo CRM: Etapas iniciais (antes de agendamento)
+ * - Planilha Google Sheets: Etapas pós-agendamento (reuniões, propostas, vendas)
+ * 
  * Multi-tenant: Token Bearer = senha|subdomain|kommoToken
  */
 
 import 'dotenv/config';
 import Fastify, { FastifyRequest, FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
-import { createKommoClient, KommoClientInterface } from "./kommo/clientCF.js";
+import { createKommoClient, KommoClientInterface } from "./kommo/client.js";
+import { createSheetsClient, SheetsClientInterface } from "./sheets/client.js";
+import { PlanilhaEvento } from "./sheets/types.js";
 import {
   LeadsListResponse,
   Lead,
   LeadUpdateRequest,
-  LeadCreateRequest,
-  LeadCreateResponse,
   NotesCreateResponse,
-  NotesListResponse,
   NoteCreateRequest,
   TasksCreateResponse,
-  TasksListResponse,
   TaskCreateRequest,
   PipelinesListResponse,
   StagesListResponse,
@@ -26,8 +36,7 @@ import {
   User,
   UsersListResponse,
   EventsListResponse,
-  Company,
-  CompaniesListResponse,
+  LeadCreateResponse,
 } from "./kommo/types.js";
 import {
   MCP_PROTOCOL_VERSION,
@@ -37,13 +46,24 @@ import {
   API_LIMITS,
   SERVER_CONFIG,
   ERROR_MESSAGES,
+  VORP_FUNNELS,
+  VorpFunnelCode,
+  SHEETS_CONFIG,
+  EVENT_STATUS,
 } from "./constants.js";
 import {
   mcpRequestSchema,
   validateToolParams,
-  executeRequestSchema,
   isMCPRequestArray,
 } from "./schemas.js";
+
+// ========== Cliente da Planilha de Eventos ==========
+// Inicializado globalmente pois é read-only e não depende de autenticação por tenant
+const sheetsClient = createSheetsClient(
+  SHEETS_CONFIG.API_KEY,
+  SHEETS_CONFIG.SPREADSHEET_ID,
+  SHEETS_CONFIG.SHEET_NAME
+);
 
 // ========== MCP Protocol Types ==========
 interface MCPRequest {
@@ -74,256 +94,990 @@ interface MCPToolDefinition {
   };
 }
 
-// Cache simples em memória
-const pipelinesCache = new Map<string, { data: unknown; expiresAt: number }>();
+// ========== Cache em memória ==========
+const cache = new Map<string, { data: unknown; expiresAt: number }>();
 
 function getCached<T>(key: string): T | null {
-  const entry = pipelinesCache.get(key);
+  const entry = cache.get(key);
   if (!entry || Date.now() > entry.expiresAt) {
-    pipelinesCache.delete(key);
+    cache.delete(key);
     return null;
   }
   return entry.data as T;
 }
 
 function setCache(key: string, data: unknown, ttlSeconds: number = CACHE_TTL.PIPELINES) {
-  pipelinesCache.set(key, {
+  cache.set(key, {
     data,
     expiresAt: Date.now() + ttlSeconds * 1000,
   });
 }
 
-// ========== Tool Definitions Generator ==========
-// Função para buscar pipelines e gerar descrição dinâmica
-async function getPipelinesDescription(client: KommoClientInterface): Promise<string> {
-  try {
-    const response = await client.get<PipelinesListResponse>("/leads/pipelines");
-    const pipelines = response._embedded?.pipelines || [];
+// ========== Mapeamento de Funis Vorp para Pipelines ==========
+interface FunnelMapping {
+  pipeline_id: number;
+  pipeline_name: string;
+  stages: Array<{ id: number; name: string; color: string }>;
+}
+
+async function getFunnelMappings(client: KommoClientInterface): Promise<Map<VorpFunnelCode, FunnelMapping>> {
+  const cacheKey = "vorp_funnel_mappings";
+  const cached = getCached<Map<VorpFunnelCode, FunnelMapping>>(cacheKey);
+  if (cached) return cached;
+
+  const response = await client.get<PipelinesListResponse>("/leads/pipelines");
+  const pipelines = response._embedded?.pipelines || [];
+  
+  const mappings = new Map<VorpFunnelCode, FunnelMapping>();
+  
+  // Primeiro passo: Buscar matches EXATOS (nome = "SDR", "BDR", "Closers")
+  for (const pipeline of pipelines) {
+    const name = pipeline.name.toLowerCase().trim();
+    const stages = pipeline._embedded?.statuses?.map(s => ({
+      id: s.id,
+      name: s.name,
+      color: s.color,
+    })) || [];
     
-    if (pipelines.length === 0) {
+    const mapping: FunnelMapping = {
+      pipeline_id: pipeline.id,
+      pipeline_name: pipeline.name,
+      stages,
+    };
+    
+    // Match EXATO primeiro (prioridade máxima)
+    if (name === 'sdr') {
+      mappings.set('SDR', mapping);
+    } else if (name === 'bdr') {
+      mappings.set('BDR', mapping);
+    } else if (name === 'closers' || name === 'closer') {
+      mappings.set('CLOSERS', mapping);
+    }
+  }
+  
+  // Segundo passo: Se não encontrou exato, buscar parcial (sem sobrescrever)
+  for (const pipeline of pipelines) {
+    const name = pipeline.name.toLowerCase().trim();
+    const stages = pipeline._embedded?.statuses?.map(s => ({
+      id: s.id,
+      name: s.name,
+      color: s.color,
+    })) || [];
+    
+    const mapping: FunnelMapping = {
+      pipeline_id: pipeline.id,
+      pipeline_name: pipeline.name,
+      stages,
+    };
+    
+    // Detectar funil SDR (se não tem match exato ainda)
+    if (!mappings.has('SDR')) {
+      if (name.includes('sdr') || (name.includes('inbound') && !name.includes('matri'))) {
+        mappings.set('SDR', mapping);
+      }
+    }
+    // Detectar funil BDR
+    if (!mappings.has('BDR')) {
+      if (name.includes('bdr') || (name.includes('outbound') && !name.includes('matri'))) {
+        mappings.set('BDR', mapping);
+      }
+    }
+    // Detectar funil Closers
+    if (!mappings.has('CLOSERS')) {
+      if (name.includes('closer') || name.includes('fechamento')) {
+        mappings.set('CLOSERS', mapping);
+      }
+    }
+  }
+  
+  // Se não encontrou todos, usar os primeiros pipelines disponíveis
+  const funnelCodes: VorpFunnelCode[] = ['SDR', 'BDR', 'CLOSERS'];
+  let pipelineIndex = 0;
+  
+  for (const code of funnelCodes) {
+    if (!mappings.has(code) && pipelines[pipelineIndex]) {
+      const pipeline = pipelines[pipelineIndex];
+      mappings.set(code, {
+        pipeline_id: pipeline.id,
+        pipeline_name: pipeline.name,
+        stages: pipeline._embedded?.statuses?.map(s => ({
+          id: s.id,
+          name: s.name,
+          color: s.color,
+        })) || [],
+      });
+      pipelineIndex++;
+    }
+  }
+  
+  setCache(cacheKey, mappings, CACHE_TTL.PIPELINES);
+  return mappings;
+}
+
+// ========== Interface para campo customizado formatado ==========
+interface FormattedCustomField {
+  field_id: number;
+  nome: string;
+  tipo: string;
+  obrigatorio: boolean;
+  opcoes: Array<{ enum_id: number; valor: string }> | null;
+}
+
+// ========== Buscar campos customizados com cache ==========
+async function getCustomFieldsCached(client: KommoClientInterface): Promise<FormattedCustomField[]> {
+  const cacheKey = "vorp_custom_fields_full";
+  const cached = getCached<FormattedCustomField[]>(cacheKey);
+  if (cached) return cached;
+
+  const response = await client.get<any>("/leads/custom_fields");
+  const fields = response._embedded?.custom_fields || [];
+
+  const formatted: FormattedCustomField[] = fields.map((f: any) => ({
+    field_id: f.id,
+    nome: f.name,
+    tipo: f.type,
+    obrigatorio: f.is_required || false,
+    opcoes: f.enums?.map((e: any) => ({
+      enum_id: e.id,
+      valor: e.value,
+    })) || null,
+  }));
+
+  setCache(cacheKey, formatted, CACHE_TTL.CUSTOM_FIELDS);
+  return formatted;
+}
+
+// ========== Gerar descrição de campos customizados para a ferramenta de atualização ==========
+async function getCustomFieldsDescription(_client: KommoClientInterface): Promise<string> {
+  // Lista estática de campos prioritários com IDs e opções - baseado no lead 21383445
+  // Isso garante que a descrição seja rápida e consistente
+  
+  let info = `
+
+📋 CAMPOS CUSTOMIZADOS DO LEAD:
+
+═══════════════════════════════════════════════════════════════
+🗓️ REUNIÃO E AGENDAMENTO
+═══════════════════════════════════════════════════════════════
+• Data e hora da reunião (1012642, date_time) → Unix timestamp em segundos
+• Link da reunião (1012648, url) → URL do Google Meet/Zoom
+• Reuniao Acontecida (1014589, select):
+  - Sim (1281851), Não (1281853)
+• Data reunião acontecida (1014591, date) → Unix timestamp
+• Temperatura do Lead (1019551, select):
+  - Frio (1286679), Morno (1286681), Quente (1286683)
+• Canal Marcado (1024629, select):
+  - Whatsapp (1291999), Api4com (1292001), 3cPlus (1292003)
+
+═══════════════════════════════════════════════════════════════
+📋 QUALIFICAÇÃO E INFORMAÇÕES
+═══════════════════════════════════════════════════════════════
+• Dor (1024463, text) → Descrição da dor/problema do cliente
+• Rede social (1018247, text) → @usuario do Instagram
+• Informações da Ligação (1017075, textarea) → Resumo da conversa
+• Segmento (1014388, select):
+  - Comércio (1281600), Serviços (1281602), Indústria (1281604)
+  - Startups e Inovação (1286763), Varejo (1287493), Atacado (1287491)
+• Bant (1012658, multiselect):
+  - BUDGET (1280132), AUTHORITY (1280134), NEED (1280136), TIMING (1280138)
+• Prazo de reposta (1012654, date_time) → Quando cliente vai responder
+• Apresentação da proposta (1012656, date_time) → Quando apresentou/vai apresentar
+
+═══════════════════════════════════════════════════════════════
+👥 RESPONSÁVEIS E ATRIBUIÇÃO
+═══════════════════════════════════════════════════════════════
+• Pré-Venda (1015049, select) → SDR responsável
+• Closer (1013954, select) → Closer que vai fechar
+• Canal (1013670, select) → ORIGEM DO LEAD - CONSULTE vorp_listar_campos_customizados para ver opcoes!
+  Exemplos: Gestao de Trafego, Indicacao, Outbound, etc
+
+═══════════════════════════════════════════════════════════════
+📦 PRODUTO E VENDA
+═══════════════════════════════════════════════════════════════
+• Produto (1013956, multiselect):
+  - Gestão de Tráfego (1284087), Estruturação Tática (1287537)
+  - GSA (1292087), Playbook de Vendas (1291635)
+• Valor mensal (1016391, monetary) → Valor do contrato mensal
+• Valor de Competencia ARR (1024619, monetary) → Valor anual
+
+═══════════════════════════════════════════════════════════════
+🏢 DADOS DA EMPRESA
+═══════════════════════════════════════════════════════════════
+• Nome fantasia (1016375, text)
+• CNPJ (1016377, text)
+• Nome completo sócio adm (1016397, text)
+• CPF sócio adm (1016399, text)
+• Faturamento Mensal (1016311, select):
+  - Abaixo de 50 mil (1283555), Entre 50 e 100 mil (1283557)
+  - Entre 100 e 300 mil (1283559), Entre 300 e 500 mil (1283561)
+  - Acima de 500 mil (1283563)
+• Faturamento Real (1017101, select)
+• Margem de Lucro (1019625, text) → Ex: "70%"
+• Cargo (1019611, select):
+  - Proprietário/sócio (1286797), Diretor (1286799)
+  - Gerente/supervisor (1286801), Operacional (1286803), Vendedor (1286805)
+• Perfil do Steakholder (1019615, multiselect):
+  - Dominante (1286819), Influente (1286821), Estável (1286823), Conforme (1286825)
+
+═══════════════════════════════════════════════════════════════
+✅ QUALIFICAÇÃO BOOLEANS
+═══════════════════════════════════════════════════════════════
+• Tem time comercial? (1018827): Sim (1286021), Não (1286023)
+• Tem CRM? (1018829): Sim (1286025), Não (1286027)
+• Pode ter Upsell? (1018831): Sim (1286029), Não (1286031)
+• Problemas Finaceiros? (1018833): Sim (1286033), Não (1286035)
+• Tem ERP? (1019617): Sim (1286827), Não (1286829)
+
+═══════════════════════════════════════════════════════════════
+💰 FINANCEIRO E CONTRATO
+═══════════════════════════════════════════════════════════════
+• Responsável financeiro (1016385, text)
+• Email do financeiro (1016387, text)
+• Telefone do financeiro (1016389, text)
+• Primeiro pagamento (1016381, date) → Unix timestamp
+• Início do projeto (1016379, date) → Unix timestamp
+• Dia da recorrência de pagamento (1016383, numeric) → Ex: 15
+• Alguma observação? (1016401, textarea)
+• UUID Contrato (1016665, text)
+• Contrato Assinado (1024711, text) → URL do contrato assinado
+
+═══════════════════════════════════════════════════════════════
+💡 COMO USAR:
+═══════════════════════════════════════════════════════════════
+Para text/textarea/url: { field_id: ID, values: [{ value: "texto" }] }
+Para date/date_time:    { field_id: ID, values: [{ value: UNIX_TIMESTAMP }] }
+Para select:            { field_id: ID, values: [{ enum_id: ENUM_ID }] }
+Para multiselect:       { field_id: ID, values: [{ enum_id: ID1 }, { enum_id: ID2 }] }
+Para monetary/numeric:  { field_id: ID, values: [{ value: "1000" }] }
+
+⚡ EXEMPLO - Reunião amanhã às 15h no Google Meet:
+custom_fields_values: [
+  { field_id: 1012642, values: [{ value: 1766149200 }] },  // Data e hora
+  { field_id: 1012648, values: [{ value: "https://meet.google.com/xxx" }] },
+  { field_id: 1019551, values: [{ enum_id: 1286683 }] }   // Temperatura: Quente
+]`;
+  
+  return info;
+}
+
+// ========== Gerar descrição dos funis para as tools ==========
+async function getFunnelsDescription(client: KommoClientInterface): Promise<string> {
+  try {
+    const mappings = await getFunnelMappings(client);
+    
+    if (mappings.size === 0) {
       return "";
     }
     
-    let pipelinesInfo = "\n\n📊 PIPELINES E ETAPAS DISPONÍVEIS NESTE CRM:\n";
+    let info = "\n\n📊 FUNIS DO GRUPO VORP CONFIGURADOS:\n";
     
-    pipelines.forEach((pipeline) => {
-      pipelinesInfo += `\n🔹 ${pipeline.name} (pipeline_id: ${pipeline.id})${pipeline.is_main ? ' [PRINCIPAL]' : ''}\n`;
-      const stages = pipeline._embedded?.statuses || [];
-      stages.forEach((stage) => {
-        pipelinesInfo += `   • ${stage.name} (status_id: ${stage.id})\n`;
+    for (const [code, mapping] of mappings) {
+      const funnelInfo = VORP_FUNNELS[code];
+      info += `\n🔹 ${funnelInfo.name} (pipeline_id: ${mapping.pipeline_id})\n`;
+      info += `   📋 Objetivo: ${funnelInfo.objective}\n`;
+      info += `   📈 Etapas:\n`;
+      mapping.stages.forEach((stage) => {
+        info += `      • ${stage.name} (status_id: ${stage.id})\n`;
       });
-    });
+    }
     
-    return pipelinesInfo;
+    return info;
   } catch (error) {
-    console.error("Error fetching pipelines for description:", error);
+    console.error("Error fetching funnels:", error);
     return "";
   }
 }
 
-// Função para gerar tool definitions dinamicamente
+// ========== Tool Definitions - Contextualizadas para Agente Comercial Vorp ==========
 async function generateToolDefinitions(client: KommoClientInterface): Promise<MCPToolDefinition[]> {
-  const pipelinesInfo = await getPipelinesDescription(client);
+  const funnelsInfo = await getFunnelsDescription(client);
+  const customFieldsInfo = await getCustomFieldsDescription(client);
   
   return [
+    // ========== FERRAMENTA PRINCIPAL: LISTAR LEADS DO FUNIL ==========
     {
-      name: "kommo_list_leads",
-      description: `Lista leads do Kommo CRM com informações de contato e filtros avançados. Use para buscar leads por nome, telefone, período de criação, status ou pipeline. RETORNA: Cada lead inclui contact_info com id, nome completo, first_name, last_name e telefone do contato principal. FILTROS DISPONÍVEIS: created_at_from/to (Unix timestamp), status_id, pipeline_id. IMPORTANTE: Sempre use esta tool ANTES de atualizar um lead para obter o lead_id correto. OTIMIZAÇÃO: Para economizar tokens, retorna detalhes completos apenas dos primeiros 10 leads. Se houver mais de 10, os demais são retornados como resumo (id, name, price, status_id, contact_info). O total sempre é informado.${pipelinesInfo}`,
+      name: "vorp_listar_leads_funil",
+      description: `🎯 BUSCA LEADS NOS FUNIS DO GRUPO VORP
+
+Esta ferramenta é essencial para o agente comercial Vorp consultar oportunidades nos três funis de vendas: SDR (leads da internet), BDR (prospecção ativa) e CLOSERS (fechamento pós-reunião).
+
+📋 COMO USAR:
+1. Escolha o funil: SDR para leads inbound, BDR para outbound, CLOSERS para negociações
+2. Aplique filtros por nome, telefone, período ou etapa
+3. Analise os resultados para tomada de decisão comercial
+
+💡 RETORNA: Lista de leads com contato principal (nome, telefone), valor, etapa atual e datas. Ideal para:
+- Verificar volume de leads em cada funil
+- Identificar leads parados em determinada etapa
+- Priorizar follow-ups e abordagens
+- Gerar relatórios de performance${funnelsInfo}`,
       inputSchema: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Texto para buscar no nome do lead ou telefone" },
-          limit: { type: "number", description: "Quantidade de resultados (padrão: 10, máximo: 250)" },
-          page: { type: "number", description: "Página para paginação (padrão: 1)" },
-          created_at_from: { type: "number", description: "Filtrar leads criados A PARTIR desta data (Unix timestamp em segundos). Exemplo: 1733961600 para 12/12/2024" },
-          created_at_to: { type: "number", description: "Filtrar leads criados ATÉ esta data (Unix timestamp em segundos). Exemplo: 1734566400 para 19/12/2024" },
-          status_id: { type: "number", description: "Filtrar por ID do status/etapa. Use os IDs listados acima nos pipelines disponíveis" },
-          pipeline_id: { type: "number", description: "Filtrar por ID do pipeline/funil. Use os IDs listados acima" },
+          funil: { 
+            type: "string", 
+            enum: ["SDR", "BDR", "CLOSERS"],
+            description: "Funil de vendas Vorp: SDR (leads da internet/inbound), BDR (prospecção ativa/outbound) ou CLOSERS (negociações pós-reunião)" 
+          },
+          query: { 
+            type: "string", 
+            description: "Buscar por nome do lead, empresa ou telefone do contato" 
+          },
+          limit: { 
+            type: "number", 
+            description: "Quantidade de leads a retornar (padrão: 10, máximo: 250)" 
+          },
+          page: { 
+            type: "number", 
+            description: "Página para paginação de resultados" 
+          },
+          created_at_from: { 
+            type: "number", 
+            description: "Filtrar leads criados A PARTIR desta data (Unix timestamp em segundos)" 
+          },
+          created_at_to: { 
+            type: "number", 
+            description: "Filtrar leads criados ATÉ esta data (Unix timestamp em segundos)" 
+          },
+          status_id: { 
+            type: "number", 
+            description: "Filtrar por etapa específica do funil (use os status_id listados acima)" 
+          },
         },
+        required: ["funil"],
       },
     },
+
+    // ========== FERRAMENTA: LISTAR ETAPAS DO FUNIL ==========
     {
-      name: "kommo_update_lead",
-      description: `Atualiza um lead específico (nome, preço, status ou campos customizados). FLUXO: 1) Use kommo_list_leads para encontrar o lead_id. 2) Para mudar status, use os status_id listados na descrição de kommo_list_leads. 3) Para campos customizados, use kommo_list_lead_custom_fields. ⚠️ IMPORTANTE APROVAÇÃO: Se a busca retornar MÚLTIPLOS leads, você DEVE pedir aprovação do usuário ANTES de atualizar, mostrando claramente: quantos leads serão afetados, nome/ID de cada um, e o que será alterado. Cada CRM tem campos diferentes. EXEMPLO para campo customizado: custom_fields_values: [{field_id: 1093415, values: [{value: 'texto'}]}]${pipelinesInfo}`,
+      name: "vorp_listar_etapas_funil",
+      description: `📊 CONSULTA ETAPAS DOS FUNIS VORP
+
+Retorna todas as etapas de um funil específico do Grupo Vorp. Use para:
+- Descobrir os status_id válidos antes de mover um lead
+- Entender a jornada do cliente em cada funil
+- Verificar gargalos entre etapas
+
+🔹 SDR: Etapas de qualificação de leads inbound (primeiro contato, qualificação, agendamento)
+🔹 BDR: Etapas de prospecção ativa (research, abordagem, conexão, agendamento)
+🔹 CLOSERS: Etapas de fechamento (reunião realizada, proposta, negociação, fechamento)${funnelsInfo}`,
       inputSchema: {
         type: "object",
         properties: {
-          lead_id: { type: "number", description: "ID do lead (obtenha com kommo_list_leads)" },
-          name: { type: "string", description: "Novo nome do lead" },
-          price: { type: "number", description: "Novo preço/valor do lead em número (ex: 1500.50)" },
-          status_id: { type: "number", description: "ID do novo status. Use os IDs listados acima" },
+          funil: { 
+            type: "string", 
+            enum: ["SDR", "BDR", "CLOSERS"],
+            description: "Funil de vendas: SDR, BDR ou CLOSERS" 
+          },
+        },
+        required: ["funil"],
+      },
+    },
+
+    // ========== FERRAMENTA: MOVER LEAD ENTRE ETAPAS ==========
+    {
+      name: "vorp_mover_lead",
+      description: `🔄 MOVE LEAD PARA OUTRA ETAPA DO FUNIL
+
+Atualiza a etapa de um lead dentro do processo comercial Vorp. Essencial para:
+- Avançar leads qualificados pelo SDR/BDR para CLOSERS
+- Registrar progresso na jornada de vendas
+- Manter o funil atualizado para gestão de pipeline
+
+⚠️ IMPORTANTE: Se a ação afetar MÚLTIPLOS leads, peça confirmação do usuário antes!
+
+📋 WORKFLOW:
+1. Use vorp_listar_leads_funil para encontrar o lead_id
+2. Use vorp_listar_etapas_funil para ver status_id disponíveis
+3. Execute a movimentação
+
+💡 Quando mover para CLOSERS: Lead passou por qualificação e tem reunião agendada/realizada${funnelsInfo}`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          lead_id: { 
+            type: "number", 
+            description: "ID do lead a ser movido (obtenha com vorp_listar_leads_funil)" 
+          },
+          funil: { 
+            type: "string", 
+            enum: ["SDR", "BDR", "CLOSERS"],
+            description: "Funil de destino" 
+          },
+          status_id: { 
+            type: "number", 
+            description: "ID da etapa de destino no funil (obtenha com vorp_listar_etapas_funil)" 
+          },
+        },
+        required: ["lead_id", "funil", "status_id"],
+      },
+    },
+
+    // ========== FERRAMENTA: ATUALIZAR LEAD ==========
+    {
+      name: "vorp_atualizar_lead",
+      description: `✏️ ATUALIZA DADOS DE UM LEAD VORP
+
+Atualiza campos de um lead (nome, valor, campos customizados).
+
+OBRIGATORIO: Use vorp_listar_campos_customizados ANTES para obter field_id e enum_id corretos!
+
+Formato para custom_fields_values:
+- Campos texto: { field_id: ID, values: [{ value: "texto" }] }
+- Campos select: { field_id: ID, values: [{ enum_id: ID_DA_OPCAO }] }
+- Campos multiselect: { field_id: ID, values: [{ enum_id: ID1 }, { enum_id: ID2 }] }
+- Campos data: { field_id: ID, values: [{ value: UNIX_TIMESTAMP }] }
+
+Exemplo completo - definir faturamento e origem:
+custom_fields_values: [
+  { field_id: 1016311, values: [{ enum_id: 1283559 }] },
+  { field_id: 1013670, values: [{ enum_id: ID_DO_CANAL }] }
+]${customFieldsInfo}`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          lead_id: { 
+            type: "number", 
+            description: "ID do lead (obtenha com vorp_listar_leads_funil)" 
+          },
+          name: { 
+            type: "string", 
+            description: "Novo nome do lead/oportunidade" 
+          },
+          price: { 
+            type: "number", 
+            description: "Novo valor do lead em reais (ex: 15000 para R$ 15.000)" 
+          },
+          status_id: { 
+            type: "number", 
+            description: "ID da nova etapa (use vorp_mover_lead para mudanças de funil)" 
+          },
           custom_fields_values: { 
             type: "array", 
-            description: "Array de campos customizados. Cada item deve ter field_id (número) e values (array com objetos contendo value). Para campos select/multiselect, pode incluir enum_id também.",
+            description: "Campos customizados: [{field_id: 123, values: [{value: 'texto'}]}]. Para campos select/multiselect use enum_id ao invés de value.",
             items: {
               type: "object",
               properties: {
-                field_id: { type: "number", description: "ID do campo customizado (obtenha com kommo_list_lead_custom_fields)" },
-                values: {
+                field_id: { type: "number" },
+                values: { 
                   type: "array",
                   items: {
                     type: "object",
                     properties: {
-                      value: { type: ["string", "number", "boolean"], description: "Valor do campo" },
-                      enum_id: { type: "number", description: "ID do enum (apenas para campos select/multiselect)" }
+                      value: { type: "string" },
+                      enum_id: { type: "number" },
                     },
-                    required: ["value"]
-                  }
-                }
+                  },
+                },
               },
-              required: ["field_id", "values"]
-            }
+            },
           },
         },
         required: ["lead_id"],
       },
     },
+
+    // ========== FERRAMENTA: ADICIONAR NOTA ==========
     {
-      name: "kommo_add_notes",
-      description: "Adiciona nota/observação a um lead no Kommo CRM. WORKFLOW: 1) Use kommo_list_leads para obter o lead_id. 2) Passe o lead_id e texto da nota. A nota será registrada no histórico do lead, visível para toda a equipe. ⚠️ IMPORTANTE APROVAÇÃO: Se for adicionar notas em MÚLTIPLOS leads (loop/iteração), você DEVE pedir aprovação do usuário ANTES, mostrando quantos e quais leads receberão a nota. Use para documentar ligações, reuniões, acordos ou qualquer informação relevante sobre o lead.",
+      name: "vorp_adicionar_nota",
+      description: `📝 REGISTRA NOTA/OBSERVAÇÃO EM UM LEAD
+
+Documenta interações e informações importantes no histórico do lead. Fundamental para:
+- Registrar resultado de ligações (SDR/BDR)
+- Documentar pontos discutidos em reuniões (CLOSERS)
+- Anotar objeções, necessidades e contexto do cliente
+- Manter equipe informada sobre status da negociação
+
+⚠️ Se for adicionar notas em MÚLTIPLOS leads, peça confirmação antes!
+
+💡 Metodologia Vorp: Documentação gera previsibilidade. "Se prometeu, cumpra" - registre os compromissos!`,
       inputSchema: {
         type: "object",
         properties: {
-          lead_id: { type: "number", description: "ID do lead (obtenha com kommo_list_leads)" },
-          text: { type: "string", description: "Texto da nota. Exemplo: 'Cliente confirmou interesse no produto X'" },
+          lead_id: { 
+            type: "number", 
+            description: "ID do lead (obtenha com vorp_listar_leads_funil)" 
+          },
+          text: { 
+            type: "string", 
+            description: "Conteúdo da nota. Ex: 'Ligação realizada - Cliente interessado, agendou demo para sexta 10h'" 
+          },
         },
         required: ["lead_id", "text"],
       },
     },
+
+    // ========== FERRAMENTA: CRIAR TAREFA ==========
     {
-      name: "kommo_add_tasks",
-      description: "Cria tarefa/lembrete para um lead no Kommo CRM. WORKFLOW: 1) Use kommo_list_leads para obter lead_id. 2) Defina complete_till em Unix timestamp (exemplo: para amanhã use Date.now()/1000 + 86400). 3) Escolha task_type_id: 1=Ligar, 2=Reunião, 3=Escrever Email. ⚠️ IMPORTANTE APROVAÇÃO: Se for criar tarefas em MÚLTIPLOS leads (loop/iteração), você DEVE pedir aprovação do usuário ANTES, mostrando quantos e quais leads receberão a tarefa. A tarefa aparecerá no calendário do responsável pelo lead. IMPORTANTE: complete_till deve ser timestamp futuro em segundos (não milissegundos).",
+      name: "vorp_criar_tarefa",
+      description: `📅 CRIA TAREFA/LEMBRETE PARA UM LEAD
+
+Agenda próximas ações comerciais para garantir follow-up. Essencial para:
+- Agendar ligações de qualificação (SDR)
+- Programar abordagens de prospecção (BDR)
+- Lembrar de enviar proposta ou fazer follow-up (CLOSERS)
+- Garantir que nenhuma oportunidade seja esquecida
+
+⚠️ Se for criar tarefas em MÚLTIPLOS leads, peça confirmação antes!
+
+📋 TIPOS DE TAREFA:
+1 = Ligar (follow-up telefônico)
+2 = Reunião (encontro agendado)
+3 = Email (enviar proposta, informações)
+
+💡 Dica: complete_till em segundos. Amanhã = Math.floor(Date.now()/1000) + 86400`,
       inputSchema: {
         type: "object",
         properties: {
-          lead_id: { type: "number", description: "ID do lead (obtenha com kommo_list_leads)" },
-          text: { type: "string", description: "Descrição da tarefa. Exemplo: 'Ligar para confirmar proposta'" },
-          complete_till: { type: "number", description: "Prazo Unix timestamp em segundos. Amanhã = Math.floor(Date.now()/1000) + 86400" },
-          task_type_id: { type: "number", description: "Tipo da tarefa: 1=Ligar (padrão), 2=Reunião, 3=Escrever Email" },
+          lead_id: { 
+            type: "number", 
+            description: "ID do lead" 
+          },
+          text: { 
+            type: "string", 
+            description: "Descrição da tarefa. Ex: 'Ligar para confirmar reunião de amanhã'" 
+          },
+          complete_till: { 
+            type: "number", 
+            description: "Prazo em Unix timestamp (segundos). Amanhã = agora + 86400" 
+          },
+          task_type_id: { 
+            type: "number", 
+            description: "Tipo: 1=Ligar, 2=Reunião, 3=Email (padrão: 1)" 
+          },
         },
         required: ["lead_id", "text", "complete_till"],
       },
     },
+
+    // ========== FERRAMENTA: CRIAR LEAD ==========
     {
-      name: "kommo_list_pipelines",
-      description: "Lista TODOS os pipelines (funis de venda) do Kommo CRM com seus estágios. USE quando precisar descobrir quais status_id existem para mover leads entre etapas do funil. RETORNA para cada pipeline: pipeline_id, nome, e lista completa de estágios com (status_id, nome, cor, ordem, tipo). WORKFLOW: 1) Chame esta tool sem parâmetros. 2) Encontre o pipeline desejado (ex: 'Vendas', 'Cobrança'). 3) Anote o status_id do estágio destino. 4) Use esse status_id em kommo_update_lead. Resultados são cacheados por 10 minutos.",
-      inputSchema: {
-        type: "object",
-        properties: {},
-      },
-    },
-    {
-      name: "kommo_list_pipeline_stages",
-      description: "Lista estágios de UM pipeline específico (alternativa mais focada ao kommo_list_pipelines). USE quando já souber o pipeline_id e quiser apenas os estágios daquele funil. RETORNA: lista de estágios com status_id, nome, cor, ordem e tipo. QUANDO USAR: Se não souber o pipeline_id, use kommo_list_pipelines primeiro para ver todos os pipelines. Se já souber o ID, use esta tool para resultados mais diretos. Útil para descobrir status_id válidos antes de mover leads.",
+      name: "vorp_criar_lead",
+      description: `Cria novo lead com contato vinculado no Kommo.
+
+IMPORTANTE: Lead e Contato sao entidades separadas. Se passar contact_first_name + contact_phone, um contato eh criado e vinculado ao lead automaticamente.
+
+Campos obrigatorios: name (nome do lead), funil (SDR/BDR/CLOSERS)
+Campos recomendados: contact_first_name, contact_phone ou contact_email
+
+Exemplo: Para "Joao Silva, tel 11999999999, SDR" use name="Joao Silva", funil="SDR", contact_first_name="Joao", contact_last_name="Silva", contact_phone="+5511999999999"${funnelsInfo}`,
       inputSchema: {
         type: "object",
         properties: {
-          pipeline_id: { type: "number", description: "ID do pipeline (obtenha com kommo_list_pipelines se necessário)" },
+          name: { 
+            type: "string", 
+            description: "Nome do lead (geralmente nome da pessoa)" 
+          },
+          funil: { 
+            type: "string", 
+            enum: ["SDR", "BDR", "CLOSERS"],
+            description: "Funil: SDR, BDR ou CLOSERS" 
+          },
+          contact_first_name: { 
+            type: "string", 
+            description: "Nome da pessoa (cria contato vinculado)" 
+          },
+          contact_last_name: { 
+            type: "string", 
+            description: "Sobrenome da pessoa" 
+          },
+          contact_phone: { 
+            type: "string", 
+            description: "Telefone. Formato: +5511999999999" 
+          },
+          contact_email: { 
+            type: "string", 
+            description: "Email do contato" 
+          },
+          company_name: { 
+            type: "string", 
+            description: "Nome da empresa (opcional)" 
+          },
+          price: { 
+            type: "number", 
+            description: "Valor potencial em reais" 
+          },
+          responsible_user_id: { 
+            type: "number", 
+            description: "ID do vendedor responsavel" 
+          },
+          status_id: { 
+            type: "number", 
+            description: "Etapa inicial no funil (opcional - usa primeira etapa se não informado)" 
+          },
         },
-        required: ["pipeline_id"],
+        required: ["name", "funil"],
       },
     },
+
+    // ========== FERRAMENTA: BUSCAR LEAD POR ID ==========
     {
-      name: "kommo_list_lead_custom_fields",
-      description: "Lista TODOS os campos customizados disponíveis para leads neste CRM específico. CRUCIAL: Cada CRM tem campos diferentes! Use esta tool para: 1) Descobrir quais campos existem (id, name, code, type). 2) Ver valores permitidos (enums) para campos de seleção. 3) Identificar campos obrigatórios (is_required). 4) Saber o tipo de dado esperado (text, numeric, select, multiselect, date, url, checkbox, etc). SEMPRE consulte esta tool antes de atualizar campos customizados, pois os IDs e estruturas variam entre CRMs diferentes.",
-      inputSchema: {
-        type: "object",
-        properties: {},
-      },
-    },
-    {
-      name: "kommo_create_lead",
-      description: `Cria um NOVO lead no Kommo CRM com contato e empresa (opcional). IMPORTANTE: Para criar lead, você DEVE fornecer informações do CONTATO. Se não tiver contato, o lead não será criado corretamente no Kommo. WORKFLOW: 1) Nome do lead (obrigatório). 2) Telefone do contato (recomendado) + primeiro nome (obrigatório se tiver telefone). 3) Sobrenome e email (opcionais). 4) Empresa (opcional: company_name). 5) Preço e status_id (opcionais). 6) Responsável (opcional: responsible_user_id - use kommo_list_users para obter IDs). ATENÇÃO: contact_first_name é OBRIGATÓRIO quando você fornece contact_phone. Pode ser apenas o primeiro nome, tipo "João" ou "Maria". O sistema cria contato + lead em uma única operação (complex lead).${pipelinesInfo}`,
-      inputSchema: {
-        type: "object",
-        properties: {
-          name: { type: "string", description: "Nome do lead (obrigatório). Ex: 'Proposta Empresa X'" },
-          price: { type: "number", description: "Valor/preço do lead. Ex: 5000" },
-          status_id: { type: "number", description: "ID do status inicial. Use os IDs listados acima" },
-          pipeline_id: { type: "number", description: "ID do pipeline. Use os IDs listados acima" },
-          responsible_user_id: { type: "number", description: "ID do usuário responsável (opcional). Use kommo_list_users para obter lista de usuários disponíveis" },
-          contact_first_name: { type: "string", description: "Primeiro nome do contato. OBRIGATÓRIO se fornecer telefone. Ex: 'João'" },
-          contact_last_name: { type: "string", description: "Sobrenome do contato (opcional). Ex: 'Silva'" },
-          contact_phone: { type: "string", description: "Telefone do contato. Ex: '+5511999999999'. Requer contact_first_name" },
-          contact_email: { type: "string", description: "Email do contato (opcional). Ex: 'joao@empresa.com'" },
-          company_name: { type: "string", description: "Nome da empresa (opcional). Ex: 'Acme Corp'" },
-          company_phone: { type: "string", description: "Telefone da empresa (opcional)" },
-        },
-        required: ["name"],
-      },
-    },
-    {
-      name: "kommo_get_lead_by_id",
-      description: "Busca UM lead específico por ID com TODOS os detalhes completos. USE quando precisar informações detalhadas de um lead que você já conhece o ID. Mais eficiente que kommo_list_leads quando você sabe o ID exato. RETORNA: Lead completo com histórico, contatos, campos customizados, tarefas.",
+      name: "vorp_buscar_lead_por_id",
+      description: `🔍 BUSCA LEAD ESPECÍFICO POR ID
+
+Retorna todos os detalhes de um lead quando você já conhece o ID. Mais eficiente que listar quando precisa de informações completas de um lead específico.
+
+💡 Retorna: dados completos, contatos, empresa, campos customizados, histórico.`,
       inputSchema: {
         type: "object",
         properties: {
-          lead_id: { type: "number", description: "ID do lead (número inteiro positivo)" },
+          lead_id: { 
+            type: "number", 
+            description: "ID do lead" 
+          },
         },
         required: ["lead_id"],
       },
     },
+
+    // ========== FERRAMENTA: BUSCAR POR TELEFONE ==========
     {
-      name: "kommo_search_leads_by_phone",
-      description: "Busca leads por TELEFONE. Muito usado em atendimento/vendas para encontrar clientes rapidamente pelo número. ATENÇÃO: Busca no telefone dos CONTATOS vinculados aos leads. Formato recomendado: +5511999999999 (com código país). Também funciona com busca parcial. RETORNA: Todos os leads cujos contatos têm aquele telefone.",
+      name: "vorp_buscar_por_telefone",
+      description: `📱 BUSCA LEADS PELO TELEFONE DO CONTATO
+
+Localiza rapidamente leads de um cliente que está ligando ou entrando em contato. Fundamental para:
+- Atendimento de retorno de ligação
+- Identificar histórico antes de uma call
+- Verificar se prospect já existe no CRM antes de criar novo lead
+
+💡 Formatos aceitos: +5511999999999, 11999999999, 999999999`,
       inputSchema: {
         type: "object",
         properties: {
-          phone: { type: "string", description: "Número de telefone completo ou parcial. Ex: '+5511999999999' ou '11999999999'" },
+          phone: { 
+            type: "string", 
+            description: "Número de telefone (completo ou parcial)" 
+          },
         },
         required: ["phone"],
       },
     },
+
+    // ========== FERRAMENTA: BUSCAR LEAD GLOBAL ==========
     {
-      name: "kommo_list_contacts",
-      description: "Lista contatos do Kommo CRM (pessoas/empresas independente dos leads). USE para gestão de contatos, buscar telefones, emails. Cada contato pode estar vinculado a múltiplos leads. FILTROS: query para buscar por nome/telefone/email, limit e page para paginação. RETORNA: Lista de contatos com telefones, emails, campos customizados.",
+      name: "vorp_buscar_lead",
+      description: `🔎 BUSCA LEADS EM TODOS OS FUNIS (SDR, BDR, CLOSERS)
+
+⚡ USE ESTA FERRAMENTA PRIMEIRO quando precisar encontrar um lead por nome!
+
+Diferente de vorp_listar_leads_funil, esta ferramenta:
+- Busca em TODOS os funis simultaneamente (SDR + BDR + CLOSERS)
+- Não requer especificar o funil
+- Ordena por atualização mais recente
+
+📋 QUANDO USAR:
+- "Busca o lead do João Silva" → use vorp_buscar_lead
+- "Preciso do lead da empresa XYZ" → use vorp_buscar_lead  
+- "Encontra o Pedro Castro pedim" → use vorp_buscar_lead
+
+🔥 DICA IMPORTANTE: 
+Se a busca por nome completo não encontrar, tente buscar por uma palavra mais específica ou única.
+Ex: Se não encontrar "Pedro Castro", busque por "pedim" (sobrenome único).
+
+💡 Após encontrar, use vorp_buscar_lead_por_id para detalhes completos com campos customizados.`,
       inputSchema: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Buscar por nome, telefone ou email" },
-          limit: { type: "number", description: "Quantidade de resultados (padrão: 50, máximo: 250)" },
-          page: { type: "number", description: "Página para paginação (padrão: 1)" },
+          query: { 
+            type: "string", 
+            description: "Nome do lead, empresa ou contato. Use a palavra mais específica/única para melhores resultados." 
+          },
+          limit: { 
+            type: "number", 
+            description: "Quantidade de resultados (padrão: 10, máximo: 50)" 
+          },
         },
+        required: ["query"],
       },
     },
+
+    // ========== FERRAMENTA: HISTÓRICO DO LEAD ==========
     {
-      name: "kommo_list_users",
-      description: "Lista TODOS os usuários/vendedores do CRM. USE para: 1) Descobrir responsible_user_id ao criar/atualizar leads. 2) Análises por vendedor. 3) Atribuir tarefas. RETORNA: Lista de usuários com ID, nome, email e permissões. Útil para saber quem são os vendedores ativos.",
+      name: "vorp_historico_lead",
+      description: `📜 CONSULTA HISTÓRICO DE EVENTOS DO LEAD
+
+Visualiza a timeline completa de um lead: mensagens, ligações, mudanças de etapa, tarefas concluídas. Use para:
+- Entender o contexto antes de uma ligação
+- Revisar interações anteriores
+- Verificar última atividade do lead
+- Identificar leads abandonados
+
+💡 Essencial para abordagem consultiva: entenda a jornada antes de falar com o cliente.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          lead_id: { 
+            type: "number", 
+            description: "ID do lead" 
+          },
+          limit: { 
+            type: "number", 
+            description: "Quantidade de eventos a retornar (padrão: 20, máximo: 100)" 
+          },
+        },
+        required: ["lead_id"],
+      },
+    },
+
+    // ========== FERRAMENTA: LISTAR VENDEDORES ==========
+    {
+      name: "vorp_listar_vendedores",
+      description: `👥 LISTA VENDEDORES/USUÁRIOS DO CRM
+
+Retorna todos os usuários do CRM com seus IDs. Use para:
+- Descobrir responsible_user_id ao criar/atualizar leads
+- Atribuir leads para vendedores específicos
+- Analisar distribuição de leads por vendedor
+- Reatribuir leads entre membros da equipe`,
       inputSchema: {
         type: "object",
         properties: {},
       },
     },
+
+    // ========== FERRAMENTA: CAMPOS CUSTOMIZADOS ==========
     {
-      name: "kommo_get_lead_events",
-      description: "Busca o HISTÓRICO DE EVENTOS de um lead. USE para entender: 1) O que aconteceu com o lead (mudanças de status, etapa). 2) Mensagens recebidas/enviadas (incoming/outgoing_chat_message). 3) Chamadas, emails, tarefas concluídas. 4) Timeline completa do lead. RETORNA: Lista de eventos com tipo, data e detalhes.",
+      name: "vorp_listar_campos_customizados",
+      description: `Lista todos os campos personalizados do CRM com seus IDs e opcoes.
+
+OBRIGATORIO: Consulte ANTES de atualizar qualquer campo customizado!
+
+Retorna para cada campo:
+- field_id: ID para usar no custom_fields_values
+- nome: Nome do campo
+- tipo: text, select, multiselect, date, date_time, monetary, numeric, etc
+- opcoes: Para campos select/multiselect, lista de {enum_id, valor}
+
+Exemplo de retorno:
+{ field_id: 1016311, nome: "Faturamento Mensal", tipo: "select", opcoes: [{enum_id: 1283559, valor: "Entre 100 e 300 mil"}] }
+
+Para usar na atualizacao: custom_fields_values: [{ field_id: 1016311, values: [{ enum_id: 1283559 }] }]`,
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+    },
+
+    // ========== FERRAMENTA: LISTAR CONTATOS ==========
+    {
+      name: "vorp_listar_contatos",
+      description: `👤 LISTA CONTATOS DO CRM
+
+Busca contatos (pessoas) independente dos leads. Um contato pode estar vinculado a múltiplos leads/oportunidades. Use para:
+- Verificar se uma pessoa já existe no CRM
+- Buscar informações de contato
+- Consultar leads vinculados a uma pessoa`,
       inputSchema: {
         type: "object",
         properties: {
-          lead_id: { type: "number", description: "ID do lead" },
-          limit: { type: "number", description: "Quantidade de eventos (padrão: 20, máximo: 100)" },
+          query: { 
+            type: "string", 
+            description: "Buscar por nome, telefone ou email" 
+          },
+          limit: { 
+            type: "number", 
+            description: "Quantidade de resultados (padrão: 50)" 
+          },
+          page: { 
+            type: "number", 
+            description: "Página para paginação" 
+          },
+        },
+      },
+    },
+
+    // ========== FERRAMENTAS DA PLANILHA DE EVENTOS ==========
+    // A planilha é a fonte de verdade para etapas pós-agendamento
+
+    {
+      name: "vorp_planilha_listar_eventos",
+      description: `📊 LISTA EVENTOS DA PLANILHA VORP (FONTE DE VERDADE PÓS-AGENDAMENTO)
+
+⚠️ IMPORTANTE: Para consultas de etapas pós-agendamento (reuniões agendadas, realizadas, propostas, contratos, vendas), USE ESTA FERRAMENTA ao invés de buscar no Kommo!
+
+A Planilha de Eventos é a fonte de verdade para:
+- Reuniões agendadas e realizadas
+- Propostas enviadas
+- Contratos enviados
+- Vendas fechadas
+- Leads perdidos pós-reunião
+
+📋 FILTROS DISPONÍVEIS:
+- tipo_evento: Agendamento, Reunião Realizada, Proposta enviada, Contrato enviado, Venda realizada
+- pipeline: SDR, BDR, CLOSERS ou MATCH_SALES
+- sdr_responsavel/closer_responsavel: Nome do responsável
+- data_de/data_ate: Filtra pela "Data do evento" (quando aconteceu)
+- data_reuniao_de/data_reuniao_ate: Filtra pela "Data da reunião agendada" (quando vai acontecer)
+- lead_id: Buscar eventos de um lead específico
+
+📅 PARA REUNIÕES FUTURAS: Use data_reuniao_de e data_reuniao_ate
+Exemplo "reuniões agendadas para amanhã": tipo_evento="Agendamento", data_reuniao_de="19/12/2025", data_reuniao_ate="19/12/2025"
+
+📅 PARA EVENTOS PASSADOS: Use data_de e data_ate
+Exemplo "agendamentos de ontem": tipo_evento="Agendamento", data_de="17/12/2025", data_ate="17/12/2025"`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          tipo_evento: { 
+            type: "string",
+            enum: ["Agendamento", "Reunião Realizada", "Proposta enviada", "Contrato enviado", "Venda realizada"],
+            description: "Tipo do evento que aconteceu" 
+          },
+          pipeline: { 
+            type: "string", 
+            enum: ["SDR", "BDR", "CLOSERS", "MATCH_SALES"],
+            description: "Filtrar por pipeline/funil" 
+          },
+          sdr_responsavel: { 
+            type: "string", 
+            description: "Nome do SDR responsável pelo agendamento" 
+          },
+          closer_responsavel: { 
+            type: "string", 
+            description: "Nome do Closer responsável" 
+          },
+          data_de: { 
+            type: "string", 
+            description: "Data inicial (DD/MM/YYYY). Filtra pela 'Data do evento' (quando aconteceu)." 
+          },
+          data_ate: { 
+            type: "string", 
+            description: "Data final (DD/MM/YYYY). Filtra pela 'Data do evento' (quando aconteceu)." 
+          },
+          data_reuniao_de: { 
+            type: "string", 
+            description: "Data inicial (DD/MM/YYYY). Filtra pela 'Data da reunião agendada' (quando vai acontecer). Use para reuniões futuras." 
+          },
+          data_reuniao_ate: { 
+            type: "string", 
+            description: "Data final (DD/MM/YYYY). Filtra pela 'Data da reunião agendada' (quando vai acontecer). Use para reuniões futuras." 
+          },
+          lead_id: { 
+            type: "number", 
+            description: "ID do lead no Kommo para buscar eventos específicos" 
+          },
+          limit: { 
+            type: "number", 
+            description: "Quantidade máxima de eventos a retornar" 
+          },
+        },
+      },
+    },
+
+    {
+      name: "vorp_planilha_eventos_lead",
+      description: `🔍 BUSCA TODOS OS EVENTOS DE UM LEAD NA PLANILHA
+
+Retorna o histórico completo de eventos de um lead específico na planilha. Use para:
+- Ver todas as reuniões agendadas/realizadas de um lead
+- Verificar status atual de negociação
+- Consultar valores de propostas e contratos
+- Entender a jornada completa pós-agendamento
+
+⚠️ Use esta ferramenta ao invés de vorp_historico_lead para informações de etapas pós-agendamento!`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          lead_id: { 
+            type: "number", 
+            description: "ID do lead no Kommo" 
+          },
         },
         required: ["lead_id"],
+      },
+    },
+
+    {
+      name: "vorp_planilha_metricas",
+      description: `📈 MÉTRICAS E KPIs DA PLANILHA DE EVENTOS
+
+Calcula métricas de performance comercial baseado nos eventos da planilha. Ideal para:
+- Relatórios de vendas
+- Análise de conversão
+- Acompanhamento de metas
+- Performance por responsável
+
+📊 MÉTRICAS RETORNADAS:
+- Total de eventos por status (agendados, realizados, propostas, contratos, vendas, perdidos)
+- Valor total de vendas e contratos
+- Taxa de conversão reunião (realizados/agendados)
+- Taxa de conversão venda (vendas/realizados)
+- Ticket médio
+
+📅 COMO USAR DATAS:
+Use data_de e data_ate com datas explícitas no formato DD/MM/YYYY ou YYYY-MM-DD.
+
+Exemplos:
+- Hoje (18/12/2025): data_de="18/12/2025", data_ate="18/12/2025"
+- Ontem (17/12/2025): data_de="17/12/2025", data_ate="17/12/2025"
+- Esta semana: data_de="16/12/2025", data_ate="22/12/2025"
+- Este mês: data_de="01/12/2025", data_ate="31/12/2025"
+
+💡 DICA: O agente já sabe a data atual, calcule as datas de início e fim antes de chamar!`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          data_de: {
+            type: "string",
+            description: "Data inicial do período (DD/MM/YYYY). OBRIGATÓRIO para filtrar por data."
+          },
+          data_ate: {
+            type: "string",
+            description: "Data final do período (DD/MM/YYYY). OBRIGATÓRIO para filtrar por data."
+          },
+          pipeline: { 
+            type: "string", 
+            enum: ["SDR", "BDR", "CLOSERS", "MATCH_SALES"],
+            description: "Filtrar por pipeline/funil" 
+          },
+          responsavel: { 
+            type: "string", 
+            description: "Nome do responsável (SDR ou Closer)" 
+          },
+        },
+      },
+    },
+
+    {
+      name: "vorp_planilha_buscar_evento",
+      description: `🔎 BUSCA EVENTO ESPECÍFICO POR ID NA PLANILHA
+
+Retorna todos os detalhes de um evento específico quando você já conhece o ID do evento (UUID).`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          evento_id: { 
+            type: "string", 
+            description: "ID único do evento (UUID)" 
+          },
+        },
+        required: ["evento_id"],
       },
     },
   ];
 }
 
-// Lista básica de nomes de tools (para endpoints estáticos)
+// Lista de nomes das tools
 const toolNames = [
-  "kommo_list_leads",
-  "kommo_update_lead",
-  "kommo_add_notes",
-  "kommo_add_tasks",
-  "kommo_list_pipelines",
-  "kommo_list_pipeline_stages",
-  "kommo_list_lead_custom_fields",
-  "kommo_create_lead",
-  "kommo_get_lead_by_id",
-  "kommo_search_leads_by_phone",
-  "kommo_list_contacts",
-  "kommo_list_users",
-  "kommo_get_lead_events",
+  "vorp_listar_leads_funil",
+  "vorp_listar_etapas_funil",
+  "vorp_mover_lead",
+  "vorp_atualizar_lead",
+  "vorp_adicionar_nota",
+  "vorp_criar_tarefa",
+  "vorp_criar_lead",
+  "vorp_buscar_lead_por_id",
+  "vorp_buscar_por_telefone",
+  "vorp_buscar_lead",
+  "vorp_historico_lead",
+  "vorp_listar_vendedores",
+  "vorp_listar_campos_customizados",
+  "vorp_listar_contatos",
+  // Ferramentas da Planilha (fonte de verdade pós-agendamento)
+  "vorp_planilha_listar_eventos",
+  "vorp_planilha_eventos_lead",
+  "vorp_planilha_metricas",
+  "vorp_planilha_buscar_evento",
 ];
 
 // ========== Tool Handlers ==========
@@ -333,36 +1087,57 @@ type ToolHandler = (
 ) => Promise<unknown>;
 
 const toolHandlers: Record<string, ToolHandler> = {
-  kommo_list_leads: async (params, client) => {
-    const validated = validateToolParams('kommo_list_leads', params);
+  // Listar leads do funil
+  vorp_listar_leads_funil: async (params, client) => {
+    const validated = validateToolParams<{
+      funil: VorpFunnelCode;
+      query?: string;
+      limit?: number;
+      page?: number;
+      created_at_from?: number;
+      created_at_to?: number;
+      status_id?: number;
+    }>('vorp_listar_leads_funil', params);
+    
     if (!validated.success) {
-      throw new Error(`Invalid parameters: ${JSON.stringify(validated)}`);
+      throw new Error(`Parâmetros inválidos: ${validated.error}`);
     }
     
     const { 
+      funil,
       query, 
       limit = API_LIMITS.DEFAULT_LEADS_LIMIT, 
       page = API_LIMITS.DEFAULT_PAGE,
       created_at_from,
       created_at_to,
       status_id,
-      pipeline_id,
     } = validated.data;
     
-    const queryParams: Record<string, unknown> = { limit, page, with: "contacts" };
-    if (query) queryParams.query = query;
+    // Obter pipeline_id do funil
+    const mappings = await getFunnelMappings(client);
+    const funnelMapping = mappings.get(funil);
     
-    // Adicionar filtros avançados
+    if (!funnelMapping) {
+      throw new Error(ERROR_MESSAGES.FUNNEL_NOT_FOUND(funil));
+    }
+    
+    const queryParams: Record<string, unknown> = { 
+      limit, 
+      page, 
+      with: "contacts",
+      'filter[statuses][0][pipeline_id]': funnelMapping.pipeline_id,
+    };
+    
+    if (query) queryParams.query = query;
     if (created_at_from) queryParams['filter[created_at][from]'] = created_at_from;
     if (created_at_to) queryParams['filter[created_at][to]'] = created_at_to;
     if (status_id) queryParams['filter[statuses][0][status_id]'] = status_id;
-    if (pipeline_id) queryParams['filter[statuses][0][pipeline_id]'] = pipeline_id;
 
     const response = await client.get<LeadsListResponse>("/leads", queryParams);
     const allLeads = response._embedded?.leads || [];
     const totalLeads = allLeads.length;
 
-    // Coletar IDs únicos de contatos para buscar detalhes
+    // Buscar detalhes dos contatos
     const contactIds = new Set<number>();
     allLeads.forEach(lead => {
       lead._embedded?.contacts?.forEach(contact => {
@@ -370,7 +1145,6 @@ const toolHandlers: Record<string, ToolHandler> = {
       });
     });
 
-    // Buscar detalhes dos contatos se houver IDs
     let contactsMap = new Map<number, Contact>();
     if (contactIds.size > 0) {
       try {
@@ -394,7 +1168,6 @@ const toolHandlers: Record<string, ToolHandler> = {
       
       let contactInfo = null;
       if (contact) {
-        // Buscar telefone nos custom fields
         const phoneField = contact.custom_fields_values?.find(
           f => f.field_code === "PHONE" || f.field_type === "multitext"
         );
@@ -409,40 +1182,115 @@ const toolHandlers: Record<string, ToolHandler> = {
         };
       }
       
+      // Encontrar nome da etapa atual
+      const currentStage = funnelMapping.stages.find(s => s.id === lead.status_id);
+      
       return {
-        ...lead,
-        contact_info: contactInfo,
-      };
-    });
-
-    // Otimização: Limitar detalhes completos a 10 leads para economizar tokens
-    if (totalLeads > API_LIMITS.MAX_LEADS_DETAIL) {
-      const detailedLeads = enrichedLeads.slice(0, API_LIMITS.MAX_LEADS_DETAIL);
-      const summaryLeads = enrichedLeads.slice(API_LIMITS.MAX_LEADS_DETAIL).map(lead => ({
         id: lead.id,
         name: lead.name,
         price: lead.price,
         status_id: lead.status_id,
+        status_name: currentStage?.name || 'Desconhecido',
         pipeline_id: lead.pipeline_id,
-        contact_info: lead.contact_info,
-      }));
-      
-      return {
-        total: totalLeads,
-        showing_details: API_LIMITS.MAX_LEADS_DETAIL,
-        detailed_leads: detailedLeads,
-        summary_leads: summaryLeads,
-        message: `Showing full details for first ${API_LIMITS.MAX_LEADS_DETAIL} leads. Remaining ${summaryLeads.length} leads shown as summary (id, name, price, status, contact_info).`
+        responsible_user_id: lead.responsible_user_id,
+        created_at: lead.created_at,
+        updated_at: lead.updated_at,
+        contact_info: contactInfo,
       };
-    }
+    });
 
-    return { total: totalLeads, leads: enrichedLeads };
+    return {
+      funil: VORP_FUNNELS[funil].name,
+      pipeline_id: funnelMapping.pipeline_id,
+      total: totalLeads,
+      leads: enrichedLeads,
+      message: totalLeads === 0 
+        ? `Nenhum lead encontrado no funil ${VORP_FUNNELS[funil].name}` 
+        : `${totalLeads} lead(s) encontrado(s) no funil ${VORP_FUNNELS[funil].name}`,
+    };
   },
 
-  kommo_update_lead: async (params, client) => {
-    const validated = validateToolParams('kommo_update_lead', params);
+  // Listar etapas do funil
+  vorp_listar_etapas_funil: async (params, client) => {
+    const validated = validateToolParams<{ funil: VorpFunnelCode }>('vorp_listar_etapas_funil', params);
+    
     if (!validated.success) {
-      throw new Error(`Invalid parameters: ${JSON.stringify(validated)}`);
+      throw new Error(`Parâmetros inválidos: ${validated.error}`);
+    }
+    
+    const { funil } = validated.data;
+    const mappings = await getFunnelMappings(client);
+    const funnelMapping = mappings.get(funil);
+    
+    if (!funnelMapping) {
+      throw new Error(ERROR_MESSAGES.FUNNEL_NOT_FOUND(funil));
+    }
+    
+    const funnelInfo = VORP_FUNNELS[funil];
+    
+    return {
+      funil: funnelInfo.name,
+      objetivo: funnelInfo.objective,
+      pipeline_id: funnelMapping.pipeline_id,
+      etapas: funnelMapping.stages.map((s, index) => ({
+        ordem: index + 1,
+        status_id: s.id,
+        nome: s.name,
+        cor: s.color,
+      })),
+    };
+  },
+
+  // Mover lead entre etapas
+  vorp_mover_lead: async (params, client) => {
+    const validated = validateToolParams<{
+      lead_id: number;
+      funil: VorpFunnelCode;
+      status_id: number;
+    }>('vorp_mover_lead', params);
+    
+    if (!validated.success) {
+      throw new Error(`Parâmetros inválidos: ${validated.error}`);
+    }
+    
+    const { lead_id, funil, status_id } = validated.data;
+    
+    const mappings = await getFunnelMappings(client);
+    const funnelMapping = mappings.get(funil);
+    
+    if (!funnelMapping) {
+      throw new Error(ERROR_MESSAGES.FUNNEL_NOT_FOUND(funil));
+    }
+    
+    const body: LeadUpdateRequest = {
+      status_id,
+      pipeline_id: funnelMapping.pipeline_id,
+    };
+
+    const result = await client.patch<Lead>(`/leads/${lead_id}`, body);
+    const stageName = funnelMapping.stages.find(s => s.id === status_id)?.name || 'Etapa desconhecida';
+    
+    return {
+      success: true,
+      lead_id,
+      funil: VORP_FUNNELS[funil].name,
+      nova_etapa: stageName,
+      message: `Lead ${lead_id} movido para "${stageName}" no funil ${VORP_FUNNELS[funil].name}`,
+    };
+  },
+
+  // Atualizar lead
+  vorp_atualizar_lead: async (params, client) => {
+    const validated = validateToolParams<{
+      lead_id: number;
+      name?: string;
+      price?: number;
+      status_id?: number;
+      custom_fields_values?: Array<{ field_id: number; values: Array<{ value: string | number | boolean; enum_id?: number }> }>;
+    }>('vorp_atualizar_lead', params);
+    
+    if (!validated.success) {
+      throw new Error(`Parâmetros inválidos: ${validated.error}`);
     }
     
     const { lead_id, name, price, status_id, custom_fields_values } = validated.data;
@@ -451,15 +1299,24 @@ const toolHandlers: Record<string, ToolHandler> = {
     if (name) body.name = name;
     if (price !== undefined) body.price = price;
     if (status_id) body.status_id = status_id;
-    if (custom_fields_values) body.custom_fields_values = custom_fields_values;
+    if (custom_fields_values) body.custom_fields_values = custom_fields_values as any;
 
-    return await client.patch<Lead>(`/leads/${lead_id}`, body);
+    const result = await client.patch<Lead>(`/leads/${lead_id}`, body);
+    
+    return {
+      success: true,
+      lead_id,
+      updated_fields: Object.keys(body),
+      message: `Lead ${lead_id} atualizado com sucesso`,
+    };
   },
 
-  kommo_add_notes: async (params, client) => {
-    const validated = validateToolParams('kommo_add_notes', params);
+  // Adicionar nota
+  vorp_adicionar_nota: async (params, client) => {
+    const validated = validateToolParams<{ lead_id: number; text: string }>('vorp_adicionar_nota', params);
+    
     if (!validated.success) {
-      throw new Error(`Invalid parameters: ${JSON.stringify(validated)}`);
+      throw new Error(`Parâmetros inválidos: ${validated.error}`);
     }
     
     const { lead_id, text } = validated.data;
@@ -471,16 +1328,32 @@ const toolHandlers: Record<string, ToolHandler> = {
     }];
 
     const response = await client.post<NotesCreateResponse>("/leads/notes", payload);
-    return response._embedded?.notes || [];
+    const note = response._embedded?.notes?.[0];
+    
+    return {
+      success: true,
+      lead_id,
+      note_id: note?.id,
+      message: `Nota adicionada ao lead ${lead_id}`,
+    };
   },
 
-  kommo_add_tasks: async (params, client) => {
-    const validated = validateToolParams('kommo_add_tasks', params);
+  // Criar tarefa
+  vorp_criar_tarefa: async (params, client) => {
+    const validated = validateToolParams<{
+      lead_id: number;
+      text: string;
+      complete_till: number;
+      task_type_id?: number;
+    }>('vorp_criar_tarefa', params);
+    
     if (!validated.success) {
-      throw new Error(`Invalid parameters: ${JSON.stringify(validated)}`);
+      throw new Error(`Parâmetros inválidos: ${validated.error}`);
     }
     
     const { lead_id, text, complete_till, task_type_id = 1 } = validated.data;
+    
+    const taskTypes: Record<number, string> = { 1: 'Ligar', 2: 'Reunião', 3: 'Email' };
     
     const payload: TaskCreateRequest[] = [{
       task_type_id,
@@ -492,106 +1365,45 @@ const toolHandlers: Record<string, ToolHandler> = {
     }];
 
     const response = await client.post<TasksCreateResponse>("/tasks", payload);
-    return response._embedded?.tasks || [];
-  },
-
-  kommo_list_pipelines: async (_params, client) => {
-    const cached = getCached<unknown>("pipelines");
-    if (cached) return cached;
-
-    const response = await client.get<PipelinesListResponse>("/leads/pipelines");
-    const pipelines = response._embedded?.pipelines || [];
-
-    const formatted = pipelines.map((p) => ({
-      id: p.id,
-      name: p.name,
-      is_main: p.is_main,
-      stages: p._embedded?.statuses?.map((s) => ({
-        id: s.id,
-        name: s.name,
-        color: s.color,
-      })) || [],
-    }));
-
-    setCache("pipelines", formatted, CACHE_TTL.PIPELINES);
-    return formatted;
-  },
-
-  kommo_list_pipeline_stages: async (params, client) => {
-    const validated = validateToolParams('kommo_list_pipeline_stages', params);
-    if (!validated.success) {
-      throw new Error(`Invalid parameters: ${JSON.stringify(validated)}`);
-    }
+    const task = response._embedded?.tasks?.[0];
     
-    const { pipeline_id } = validated.data;
+    const prazoDate = new Date(complete_till * 1000);
     
-    const cacheKey = `stages_${pipeline_id}`;
-    const cached = getCached<unknown>(cacheKey);
-    if (cached) return cached;
-
-    const response = await client.get<StagesListResponse>(
-      `/leads/pipelines/${pipeline_id}/statuses`
-    );
-    const stages = response._embedded?.statuses || [];
-
-    const formatted = stages.map((s) => ({
-      id: s.id,
-      name: s.name,
-      color: s.color,
-      sort: s.sort,
-    }));
-
-    setCache(cacheKey, formatted, CACHE_TTL.STAGES);
-    return formatted;
+    return {
+      success: true,
+      lead_id,
+      task_id: task?.id,
+      tipo: taskTypes[task_type_id] || 'Tarefa',
+      prazo: prazoDate.toLocaleString('pt-BR'),
+      message: `Tarefa "${text}" criada para ${prazoDate.toLocaleDateString('pt-BR')}`,
+    };
   },
 
-  kommo_list_lead_custom_fields: async (_params, client) => {
-    const cacheKey = "lead_custom_fields";
-    const cached = getCached<unknown>(cacheKey);
-    if (cached) return cached;
-
-    const response = await client.get<any>("/leads/custom_fields");
-    const fields = response._embedded?.custom_fields || [];
-
-    const formatted = fields.map((f: any) => ({
-      id: f.id,
-      name: f.name,
-      type: f.type,
-      code: f.code || null,
-      sort: f.sort,
-      entity_type: f.entity_type,
-      is_required: f.is_required || false,
-      is_predefined: f.is_predefined || false,
-      is_deletable: f.is_deletable || false,
-      is_api_only: f.is_api_only || false,
-      group_id: f.group_id || null,
-      remind: f.remind || null,
-      enums: f.enums?.map((e: any) => ({
-        id: e.id,
-        value: e.value,
-        sort: e.sort,
-      })) || null,
-      required_statuses: f.required_statuses?.map((rs: any) => ({
-        status_id: rs.status_id,
-        pipeline_id: rs.pipeline_id,
-      })) || null,
-    }));
-
-    setCache(cacheKey, formatted, CACHE_TTL.CUSTOM_FIELDS);
-    return formatted;
-  },
-
-  kommo_create_lead: async (params, client) => {
-    const validated = validateToolParams('kommo_create_lead', params);
+  // Criar lead
+  vorp_criar_lead: async (params, client) => {
+    const validated = validateToolParams<{
+      name: string;
+      funil: VorpFunnelCode;
+      status_id?: number;
+      price?: number;
+      responsible_user_id?: number;
+      contact_first_name?: string;
+      contact_last_name?: string;
+      contact_phone?: string;
+      contact_email?: string;
+      company_name?: string;
+      company_phone?: string;
+    }>('vorp_criar_lead', params);
+    
     if (!validated.success) {
-      throw new Error(`Invalid parameters: ${JSON.stringify(validated)}`);
+      throw new Error(`Parâmetros inválidos: ${validated.error}`);
     }
     
     const { 
       name, 
+      funil,
+      status_id,
       price, 
-      status_id, 
-      pipeline_id,
       responsible_user_id,
       contact_first_name,
       contact_last_name,
@@ -599,25 +1411,32 @@ const toolHandlers: Record<string, ToolHandler> = {
       contact_email,
       company_name,
       company_phone,
-      custom_fields_values
     } = validated.data;
     
-    // Construir payload complexo do lead
+    // Obter pipeline_id do funil
+    const mappings = await getFunnelMappings(client);
+    const funnelMapping = mappings.get(funil);
+    
+    if (!funnelMapping) {
+      throw new Error(ERROR_MESSAGES.FUNNEL_NOT_FOUND(funil));
+    }
+    
+    // Usar primeira etapa se não especificada
+    const finalStatusId = status_id || funnelMapping.stages[0]?.id;
+    
     const leadData: any = {
       name,
       price,
-      status_id,
-      pipeline_id,
+      status_id: finalStatusId,
+      pipeline_id: funnelMapping.pipeline_id,
       responsible_user_id,
-      custom_fields_values,
       _embedded: {},
     };
     
-    // Criar contato (obrigatório no Kommo para ter telefone)
+    // Criar contato
     if (contact_first_name || contact_phone || contact_email) {
       const contactCustomFields: any[] = [];
       
-      // Adicionar telefone
       if (contact_phone) {
         contactCustomFields.push({
           field_code: "PHONE",
@@ -625,7 +1444,6 @@ const toolHandlers: Record<string, ToolHandler> = {
         });
       }
       
-      // Adicionar email
       if (contact_email) {
         contactCustomFields.push({
           field_code: "EMAIL",
@@ -633,7 +1451,6 @@ const toolHandlers: Record<string, ToolHandler> = {
         });
       }
       
-      // Montar nome completo do contato
       const fullName = contact_last_name 
         ? `${contact_first_name} ${contact_last_name}` 
         : contact_first_name || "Contato";
@@ -646,7 +1463,7 @@ const toolHandlers: Record<string, ToolHandler> = {
       }];
     }
     
-    // Criar empresa (opcional)
+    // Criar empresa
     if (company_name) {
       const companyCustomFields: any[] = [];
       
@@ -663,260 +1480,322 @@ const toolHandlers: Record<string, ToolHandler> = {
       }];
     }
     
-    // Usar endpoint /leads/complex para criar lead com contato e empresa
     const endpoint = (contact_first_name || company_name) ? "/leads/complex" : "/leads";
-    const payload = endpoint === "/leads/complex" ? [leadData] : [leadData];
+    const payload = [leadData];
     
     const response = await client.post<LeadCreateResponse>(endpoint, payload);
     const createdLead = response._embedded?.leads?.[0];
     
-    if (createdLead) {
-      return {
-        success: true,
-        lead: createdLead,
-        message: `Lead "${createdLead.name}" criado com sucesso! ID: ${createdLead.id}`,
-      };
-    }
+    const stageName = funnelMapping.stages.find(s => s.id === finalStatusId)?.name || 'Primeira etapa';
     
-    return response;
+    return {
+      success: true,
+      lead_id: createdLead?.id,
+      funil: VORP_FUNNELS[funil].name,
+      etapa: stageName,
+      message: `Lead "${name}" criado no funil ${VORP_FUNNELS[funil].name}, etapa "${stageName}"`,
+    };
   },
 
-  kommo_get_lead_by_id: async (params, client) => {
-    const validated = validateToolParams('kommo_get_lead_by_id', params);
+  // Buscar lead por ID
+  vorp_buscar_lead_por_id: async (params, client) => {
+    const validated = validateToolParams<{ lead_id: number }>('vorp_buscar_lead_por_id', params);
+    
     if (!validated.success) {
-      throw new Error(`Invalid parameters: ${JSON.stringify(validated)}`);
+      throw new Error(`Parâmetros inválidos: ${validated.error}`);
     }
     
     const { lead_id } = validated.data;
     
-    // Buscar lead com contatos e empresas
     const lead = await client.get<Lead>(`/leads/${lead_id}`, { with: "contacts,companies" });
     
-    // Resultado enriquecido
-    const enrichedResult: any = {
-      // Dados básicos do lead
+    // Identificar funil
+    const mappings = await getFunnelMappings(client);
+    let funnelName = 'Outro';
+    let stageName = 'Desconhecida';
+    
+    for (const [code, mapping] of mappings) {
+      if (mapping.pipeline_id === lead.pipeline_id) {
+        funnelName = VORP_FUNNELS[code].name;
+        stageName = mapping.stages.find(s => s.id === lead.status_id)?.name || 'Desconhecida';
+        break;
+      }
+    }
+    
+    return {
       id: lead.id,
       name: lead.name,
       price: lead.price,
+      funil: funnelName,
+      etapa: stageName,
       status_id: lead.status_id,
       pipeline_id: lead.pipeline_id,
       responsible_user_id: lead.responsible_user_id,
-      created_at: lead.created_at,
-      updated_at: lead.updated_at,
-      closed_at: lead.closed_at,
-      loss_reason_id: lead.loss_reason_id,
-      custom_fields_values: lead.custom_fields_values,
-      tags: lead._embedded?.tags || [],
-      
-      // Dados enriquecidos (serão preenchidos abaixo)
-      contacts: [],
-      companies: [],
-      tasks: [],
-      notes: [],
-      events: [],
+      created_at: new Date(lead.created_at * 1000).toLocaleString('pt-BR'),
+      updated_at: new Date(lead.updated_at * 1000).toLocaleString('pt-BR'),
+      contacts: lead._embedded?.contacts || [],
+      companies: lead._embedded?.companies || [],
+      custom_fields: lead.custom_fields_values,
     };
+  },
+
+  // Buscar por telefone
+  vorp_buscar_por_telefone: async (params, client) => {
+    const validated = validateToolParams<{ phone: string }>('vorp_buscar_por_telefone', params);
     
+    if (!validated.success) {
+      throw new Error(`Parâmetros inválidos: ${validated.error}`);
+    }
+    
+    const { phone } = validated.data;
+    
+    const response = await client.get<LeadsListResponse>("/leads", { 
+      query: phone, 
+      with: "contacts",
+      limit: 50,
+    });
+    
+    const leads = response._embedded?.leads || [];
+    
+    return {
+      phone,
+      total: leads.length,
+      leads: leads.map(lead => ({
+        id: lead.id,
+        name: lead.name,
+        price: lead.price,
+        status_id: lead.status_id,
+        pipeline_id: lead.pipeline_id,
+      })),
+      message: leads.length === 0 
+        ? `Nenhum lead encontrado com telefone ${phone}` 
+        : `${leads.length} lead(s) encontrado(s) com telefone ${phone}`,
+    };
+  },
+
+  // Busca global de leads (todos os funis)
+  vorp_buscar_lead: async (params, client) => {
+    const query = params.query as string;
+    const limit = Math.min((params.limit as number) || 10, 50);
+    
+    if (!query || query.trim().length < 2) {
+      throw new Error("O termo de busca deve ter pelo menos 2 caracteres");
+    }
+
+    // Obter mapeamentos dos funis Vorp
+    const mappings = await getFunnelMappings(client);
+    const vorpPipelineIds = Array.from(mappings.values()).map(m => m.pipeline_id);
+
+    // Buscar leads usando a query - buscar bastante para ter margem
+    const response = await client.get<LeadsListResponse>("/leads", { 
+      query: query.trim(),
+      with: "contacts",
+      limit: limit * 3, // Buscar mais para filtrar e ordenar depois
+      order: { updated_at: 'desc' }, // Mais recentes primeiro
+    });
+    
+    let leads = response._embedded?.leads || [];
+    
+    // Filtrar apenas leads dos funis Vorp (SDR, BDR, CLOSERS)
+    leads = leads.filter(lead => vorpPipelineIds.includes(lead.pipeline_id));
+    
+    // Ordenar por data de atualização (mais recentes primeiro)
+    leads.sort((a, b) => b.updated_at - a.updated_at);
+    
+    // Limitar ao número pedido
+    leads = leads.slice(0, limit);
+
+    // Mapear nome do funil para cada lead
+    const pipelineToFunnel = new Map<number, string>();
+    for (const [code, mapping] of mappings) {
+      pipelineToFunnel.set(mapping.pipeline_id, VORP_FUNNELS[code].name);
+    }
+
     // Buscar detalhes dos contatos
-    if (lead._embedded?.contacts && lead._embedded.contacts.length > 0) {
-      const contactIds = lead._embedded.contacts.map(c => c.id);
+    const contactIds = new Set<number>();
+    leads.forEach(lead => {
+      lead._embedded?.contacts?.forEach(contact => {
+        contactIds.add(contact.id);
+      });
+    });
+
+    let contactsMap = new Map<number, Contact>();
+    if (contactIds.size > 0) {
       try {
         const contactsResponse = await client.get<ContactsListResponse>(
           "/contacts", 
-          { id: contactIds }
+          { id: Array.from(contactIds) }
         );
         const contacts = contactsResponse._embedded?.contacts || [];
-        
-        enrichedResult.contacts = contacts.map(c => {
-          const phoneField = c.custom_fields_values?.find(
-            f => f.field_code === "PHONE" || f.field_type === "multitext"
-          );
-          const emailField = c.custom_fields_values?.find(
-            f => f.field_code === "EMAIL"
-          );
-          
-          const isMain = lead._embedded?.contacts?.some(ec => ec.id === c.id && ec.is_main);
-          
-          return {
-            id: c.id,
-            name: c.name,
-            first_name: c.first_name,
-            last_name: c.last_name,
-            is_main: isMain || false,
-            phone: phoneField?.values?.[0]?.value || null,
-            email: emailField?.values?.[0]?.value || null,
-            custom_fields: c.custom_fields_values,
-          };
+        contacts.forEach(contact => {
+          contactsMap.set(contact.id, contact);
         });
       } catch (error) {
         console.error("Error fetching contacts:", error);
       }
     }
     
-    // Buscar detalhes das empresas
-    if (lead._embedded?.companies && lead._embedded.companies.length > 0) {
-      const companyIds = lead._embedded.companies.map(c => c.id);
-      try {
-        const companiesResponse = await client.get<CompaniesListResponse>(
-          "/companies", 
-          { id: companyIds }
-        );
-        const companies = companiesResponse._embedded?.companies || [];
-        
-        enrichedResult.companies = companies.map(c => ({
-          id: c.id,
-          name: c.name,
-          custom_fields: c.custom_fields_values,
-        }));
-      } catch (error) {
-        console.error("Error fetching companies:", error);
-      }
-    }
-    
-    // Buscar tarefas do lead
-    try {
-      const tasksResponse = await client.get<TasksListResponse>("/tasks", {
-        "filter[entity_type]": "leads",
-        "filter[entity_id][]": lead_id,
-        limit: 50,
-      });
-      const tasks = tasksResponse._embedded?.tasks || [];
-      
-      enrichedResult.tasks = tasks.map(t => ({
-        id: t.id,
-        text: t.text,
-        is_completed: t.is_completed,
-        complete_till: t.complete_till,
-        task_type_id: t.task_type_id,
-        responsible_user_id: t.responsible_user_id,
-        result: t.result?.text || null,
-        created_at: t.created_at,
-      }));
-    } catch (error) {
-      console.error("Error fetching tasks:", error);
-    }
-    
-    // Buscar notas do lead
-    try {
-      const notesResponse = await client.get<NotesListResponse>(`/leads/${lead_id}/notes`, {
-        limit: 50,
-      });
-      const notes = notesResponse._embedded?.notes || [];
-      
-      enrichedResult.notes = notes.map(n => ({
-        id: n.id,
-        note_type: n.note_type,
-        text: n.params?.text || null,
-        created_at: n.created_at,
-        created_by: n.created_by,
-      }));
-    } catch (error) {
-      console.error("Error fetching notes:", error);
-    }
-    
-    // Buscar eventos recentes do lead
-    try {
-      const eventsResponse = await client.get<EventsListResponse>("/events", {
-        "filter[entity]": "lead",
-        "filter[entity_id][]": lead_id,
-        limit: 20,
-      });
-      const events = eventsResponse._embedded?.events || [];
-      
-      enrichedResult.events = events.map(e => ({
-        id: e.id,
-        type: e.type,
-        created_at: e.created_at,
-        value_after: e.value_after,
-      }));
-    } catch (error) {
-      console.error("Error fetching events:", error);
-    }
-    
-    // Resumo para facilitar leitura
-    enrichedResult.summary = {
-      total_contacts: enrichedResult.contacts.length,
-      total_companies: enrichedResult.companies.length,
-      total_tasks: enrichedResult.tasks.length,
-      pending_tasks: enrichedResult.tasks.filter((t: any) => !t.is_completed).length,
-      total_notes: enrichedResult.notes.length,
-      total_events: enrichedResult.events.length,
-      main_contact: enrichedResult.contacts.find((c: any) => c.is_main) || null,
-    };
-    
-    return enrichedResult;
-  },
-
-  kommo_search_leads_by_phone: async (params, client) => {
-    const validated = validateToolParams('kommo_search_leads_by_phone', params);
-    if (!validated.success) {
-      throw new Error(`Invalid parameters: ${JSON.stringify(validated)}`);
-    }
-    
-    const { phone } = validated.data;
-    
-    // Buscar contatos por telefone
-    const contactsResponse = await client.get<ContactsListResponse>("/contacts", { query: phone });
-    const contacts = contactsResponse._embedded?.contacts || [];
-    
-    if (contacts.length === 0) {
-      return { total: 0, leads: [], message: "Nenhum contato encontrado com este telefone" };
-    }
-    
-    // Buscar leads vinculados a esses contatos
-    const contactIds = contacts.map(c => c.id);
-    const leadsPromises = contactIds.map(contactId => 
-      client.get<LeadsListResponse>("/leads", { 
-        query: String(contactId),
-        with: "contacts",
-        limit: 250 
-      }).catch(() => ({ _embedded: { leads: [] } }))
-    );
-    
-    const leadsResponses = await Promise.all(leadsPromises);
-    const allLeads = leadsResponses.flatMap(r => r._embedded?.leads || []);
-    
-    // Remover duplicatas por ID
-    const uniqueLeads = Array.from(
-      new Map(allLeads.map(lead => [lead.id, lead])).values()
-    );
-    
-    // Enriquecer com informações de contato
-    const enrichedLeads = uniqueLeads.map(lead => {
+    const enrichedLeads = leads.map(lead => {
       const mainContactId = lead._embedded?.contacts?.find(c => c.is_main)?.id;
-      const contact = contacts.find(c => c.id === mainContactId);
+      const contact = mainContactId ? contactsMap.get(mainContactId) : null;
       
+      let contactInfo = null;
       if (contact) {
         const phoneField = contact.custom_fields_values?.find(
           f => f.field_code === "PHONE" || f.field_type === "multitext"
         );
-        const contactPhone = phoneField?.values?.[0]?.value || null;
-        
-        return {
-          ...lead,
-          contact_info: {
-            id: contact.id,
-            name: contact.name,
-            phone: contactPhone,
-          }
+        contactInfo = {
+          nome: contact.name,
+          telefone: phoneField?.values?.[0]?.value || null,
         };
       }
-      return lead;
+
+      return {
+        id: lead.id,
+        name: lead.name,
+        funil: pipelineToFunnel.get(lead.pipeline_id) || 'Desconhecido',
+        pipeline_id: lead.pipeline_id,
+        status_id: lead.status_id,
+        price: lead.price,
+        contato: contactInfo,
+        updated_at: new Date(lead.updated_at * 1000).toLocaleString('pt-BR'),
+      };
     });
-    
-    return { 
-      total: enrichedLeads.length, 
+
+    return {
+      busca: query,
+      total: enrichedLeads.length,
       leads: enrichedLeads,
-      contacts_found: contacts.length 
+      message: enrichedLeads.length === 0 
+        ? `Nenhum lead encontrado para "${query}" nos funis SDR, BDR ou CLOSERS` 
+        : `${enrichedLeads.length} lead(s) encontrado(s) para "${query}"`,
     };
   },
 
-  kommo_list_contacts: async (params, client) => {
-    const validated = validateToolParams('kommo_list_contacts', params);
+  // Histórico do lead
+  vorp_historico_lead: async (params, client) => {
+    const validated = validateToolParams<{ lead_id: number; limit?: number }>('vorp_historico_lead', params);
+    
     if (!validated.success) {
-      throw new Error(`Invalid parameters: ${JSON.stringify(validated)}`);
+      throw new Error(`Parâmetros inválidos: ${validated.error}`);
     }
     
-    const { query, limit = 50, page = 1 } = validated.data;
+    const { lead_id, limit = 20 } = validated.data;
+    
+    const response = await client.get<EventsListResponse>("/events", {
+      'filter[entity]': 'lead',
+      'filter[entity_id]': lead_id,
+      limit,
+    });
+    
+    const events = response._embedded?.events || [];
+    
+    const eventTypes: Record<string, string> = {
+      'incoming_chat_message': '💬 Mensagem recebida',
+      'outgoing_chat_message': '📤 Mensagem enviada',
+      'lead_status_changed': '🔄 Etapa alterada',
+      'incoming_call': '📞 Ligação recebida',
+      'outgoing_call': '📱 Ligação realizada',
+      'task_completed': '✅ Tarefa concluída',
+      'note_added': '📝 Nota adicionada',
+      'lead_added': '➕ Lead criado',
+    };
+    
+    return {
+      lead_id,
+      total_eventos: events.length,
+      eventos: events.map(event => ({
+        id: event.id,
+        tipo: eventTypes[event.type] || event.type,
+        data: new Date(event.created_at * 1000).toLocaleString('pt-BR'),
+        detalhes: event.value_after,
+      })),
+    };
+  },
+
+  // Listar vendedores
+  vorp_listar_vendedores: async (_params, client) => {
+    const cacheKey = "vorp_users";
+    const cached = getCached<User[]>(cacheKey);
+    if (cached) {
+      return { vendedores: cached };
+    }
+    
+    const response = await client.get<UsersListResponse>("/users");
+    const users = response._embedded?.users || [];
+    
+    const formatted = users.map(u => ({
+      id: u.id,
+      nome: u.name,
+      email: u.email,
+    }));
+    
+    setCache(cacheKey, formatted, CACHE_TTL.USERS);
+    
+    return { vendedores: formatted };
+  },
+
+  // Listar campos customizados
+  vorp_listar_campos_customizados: async (_params, client) => {
+    const cacheKey = "vorp_custom_fields_v2";
+    const cached = getCached<unknown>(cacheKey);
+    if (cached) return cached;
+
+    const response = await client.get<any>("/leads/custom_fields");
+    const fields = response._embedded?.custom_fields || [];
+
+    // Campos mais usados que precisam destaque
+    const camposImportantes = [
+      'Faturamento Mensal', 'Faturamento Real', 'Canal', 'Temperatura do Lead',
+      'Segmento', 'Produto', 'Cargo', 'Reuniao Acontecida', 'Data e hora da reunião',
+      'Link da reunião', 'Dor', 'Bant'
+    ];
+
+    const formatted = fields.map((f: any) => {
+      const isImportante = camposImportantes.some(c => 
+        f.name.toLowerCase().includes(c.toLowerCase())
+      );
+      
+      return {
+        field_id: f.id,
+        nome: f.name,
+        tipo: f.type,
+        obrigatorio: f.is_required || false,
+        destaque: isImportante,
+        opcoes: f.enums?.map((e: any) => ({
+          enum_id: e.id,
+          valor: e.value,
+        })) || null,
+        uso: f.type === 'select' || f.type === 'multiselect' 
+          ? `{ field_id: ${f.id}, values: [{ enum_id: ID_DA_OPCAO }] }`
+          : f.type === 'date' || f.type === 'date_time'
+          ? `{ field_id: ${f.id}, values: [{ value: UNIX_TIMESTAMP }] }`
+          : `{ field_id: ${f.id}, values: [{ value: "texto" }] }`,
+      };
+    });
+
+    // Ordenar: campos importantes primeiro
+    formatted.sort((a: any, b: any) => {
+      if (a.destaque && !b.destaque) return -1;
+      if (!a.destaque && b.destaque) return 1;
+      return 0;
+    });
+
+    const result = { 
+      instrucoes: "Para atualizar um lead, use custom_fields_values com field_id e enum_id (para select) ou value (para texto/data). Campos com destaque=true sao os mais usados.",
+      total: formatted.length,
+      campos: formatted 
+    };
+
+    setCache(cacheKey, result, CACHE_TTL.CUSTOM_FIELDS);
+    return result;
+  },
+
+  // Listar contatos
+  vorp_listar_contatos: async (params, client) => {
+    const query = params.query as string | undefined;
+    const limit = (params.limit as number) || 50;
+    const page = (params.page as number) || 1;
     
     const queryParams: Record<string, unknown> = { limit, page };
     if (query) queryParams.query = query;
@@ -924,417 +1803,449 @@ const toolHandlers: Record<string, ToolHandler> = {
     const response = await client.get<ContactsListResponse>("/contacts", queryParams);
     const contacts = response._embedded?.contacts || [];
     
-    // Formatar contatos com telefones e emails
-    const formatted = contacts.map(contact => {
-      const phoneField = contact.custom_fields_values?.find(
-        f => f.field_code === "PHONE" || f.field_type === "multitext"
-      );
-      const emailField = contact.custom_fields_values?.find(
-        f => f.field_code === "EMAIL"
-      );
-      
-      const phones = phoneField?.values?.map(v => v.value) || [];
-      const emails = emailField?.values?.map(v => v.value) || [];
-      
+    return {
+      total: contacts.length,
+      contatos: contacts.map(c => {
+        const phoneField = c.custom_fields_values?.find(
+          f => f.field_code === "PHONE"
+        );
+        const emailField = c.custom_fields_values?.find(
+          f => f.field_code === "EMAIL"
+        );
+        
+        return {
+          id: c.id,
+          nome: c.name,
+          telefone: phoneField?.values?.[0]?.value || null,
+          email: emailField?.values?.[0]?.value || null,
+        };
+      }),
+    };
+  },
+
+  // ========== HANDLERS DA PLANILHA DE EVENTOS ==========
+  // Fonte de verdade para etapas pós-agendamento
+
+  // Listar eventos da planilha
+  vorp_planilha_listar_eventos: async (params, _client) => {
+    const tipo_evento = params.tipo_evento as string | undefined;
+    const pipeline = params.pipeline as string | undefined;
+    const sdr_responsavel = params.sdr_responsavel as string | undefined;
+    const closer_responsavel = params.closer_responsavel as string | undefined;
+    const data_de = params.data_de as string | undefined;
+    const data_ate = params.data_ate as string | undefined;
+    const data_reuniao_de = params.data_reuniao_de as string | undefined;
+    const data_reuniao_ate = params.data_reuniao_ate as string | undefined;
+    const lead_id = params.lead_id as number | undefined;
+    const limit = params.limit as number | undefined;
+
+    // Se tem lead_id, buscar eventos específicos desse lead
+    if (lead_id) {
+      const eventos = await sheetsClient.getEventoByLeadId(lead_id);
       return {
-        id: contact.id,
-        name: contact.name,
-        first_name: contact.first_name,
-        last_name: contact.last_name,
-        phones,
-        emails,
-        created_at: contact.created_at,
-        updated_at: contact.updated_at,
+        fonte: "Planilha de Eventos Vorp",
+        lead_id,
+        total: eventos.length,
+        eventos: eventos.map(formatEventoParaResposta),
+        message: eventos.length === 0 
+          ? `Nenhum evento encontrado para o lead ${lead_id}` 
+          : `${eventos.length} evento(s) encontrado(s) para o lead ${lead_id}`,
       };
-    });
-    
-    return { total: formatted.length, contacts: formatted };
-  },
+    }
 
-  kommo_list_users: async (_params, client) => {
-    const response = await client.get<UsersListResponse>("/users");
-    const users = response._embedded?.users || [];
+    // Montar filtros
+    const filters: any = {};
+    if (tipo_evento) filters.tipo_evento = tipo_evento;
+    if (pipeline) filters.pipeline = pipeline;
+    if (sdr_responsavel) filters.sdr_responsavel = sdr_responsavel;
+    if (closer_responsavel) filters.closer_responsavel = closer_responsavel;
+    if (limit) filters.limit = limit;
     
-    const formatted = users.map(user => ({
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      lang: user.lang,
-      can_add_leads: user.rights?.lead_add === "Y",
-      can_edit_leads: user.rights?.lead_edit === "Y",
-    }));
-    
-    return { total: formatted.length, users: formatted };
-  },
-
-  kommo_get_lead_events: async (params, client) => {
-    const validated = validateToolParams('kommo_get_lead_events', params);
-    if (!validated.success) {
-      throw new Error(`Invalid parameters: ${JSON.stringify(validated)}`);
+    // Converter datas do evento (quando aconteceu)
+    if (data_de) {
+      filters.data_de = parseDateInput(data_de);
+    }
+    if (data_ate) {
+      filters.data_ate = parseDateInput(data_ate, true); // true = final do dia (23:59:59)
     }
     
-    const { lead_id, limit } = validated.data;
-    
-    // Buscar eventos do lead (note: filter[entity_id][] requer formato de array)
-    const eventsResponse = await client.get<EventsListResponse>("/events", {
-      "filter[entity]": "lead",
-      "filter[entity_id][]": lead_id,
-      limit: limit,
-    });
-    
-    const events = eventsResponse._embedded?.events || [];
-    
-    // Formatar eventos
-    const formatted = events.map(event => ({
-      id: event.id,
-      type: event.type,
-      created_at: event.created_at,
-      created_by: event.created_by,
-      value_after: event.value_after,
-      // Para mensagens de chat, extrair info útil
-      message_info: event.value_after?.[0]?.message ? {
-        origin: event.value_after[0].message.origin,
-        talk_id: event.value_after[0].message.talk_id,
-      } : null,
-    }));
+    // Converter datas da reunião agendada (quando vai acontecer)
+    if (data_reuniao_de) {
+      filters.data_reuniao_de = parseDateInput(data_reuniao_de);
+    }
+    if (data_reuniao_ate) {
+      filters.data_reuniao_ate = parseDateInput(data_reuniao_ate, true);
+    }
+
+    const eventos = await sheetsClient.getEventos(filters);
     
     return {
-      lead_id: lead_id,
-      total_events: formatted.length,
-      events: formatted,
+      fonte: "Planilha de Eventos Vorp",
+      filtros_aplicados: { 
+        tipo_evento, 
+        pipeline, 
+        sdr_responsavel, 
+        closer_responsavel, 
+        data_de, 
+        data_ate,
+        data_reuniao_de,
+        data_reuniao_ate
+      },
+      total: eventos.length,
+      eventos: eventos.map(formatEventoParaResposta),
+      message: eventos.length === 0 
+        ? "Nenhum evento encontrado com os filtros aplicados" 
+        : `${eventos.length} evento(s) encontrado(s)`,
+    };
+  },
+
+  // Buscar eventos de um lead específico
+  vorp_planilha_eventos_lead: async (params, _client) => {
+    const lead_id = params.lead_id as number;
+    
+    if (!lead_id) {
+      throw new Error("lead_id é obrigatório");
+    }
+
+    const eventos = await sheetsClient.getEventoByLeadId(lead_id);
+    
+    return {
+      fonte: "Planilha de Eventos Vorp",
+      lead_id,
+      total: eventos.length,
+      eventos: eventos.map(formatEventoParaResposta),
+      resumo: eventos.length > 0 ? {
+        ultimo_status: eventos[eventos.length - 1].status_agendamento,
+        ultimo_tipo: eventos[eventos.length - 1].tipo_evento,
+        tem_venda: eventos.some(e => e.status_agendamento.toLowerCase() === 'venda'),
+        valor_total: eventos.reduce((sum, e) => sum + (e.valor_venda || 0), 0),
+      } : null,
+      message: eventos.length === 0 
+        ? `Lead ${lead_id} não possui eventos na planilha (pode estar em etapas iniciais no Kommo)` 
+        : `${eventos.length} evento(s) encontrado(s) para o lead ${lead_id}`,
+    };
+  },
+
+  // Métricas da planilha
+  vorp_planilha_metricas: async (params, _client) => {
+    const pipeline = params.pipeline as string | undefined;
+    const responsavel = params.responsavel as string | undefined;
+    const data_de_str = params.data_de as string | undefined;
+    const data_ate_str = params.data_ate as string | undefined;
+
+    // Converter datas string para Date se fornecidas
+    const data_de = data_de_str ? parseDateInput(data_de_str) : undefined;
+    const data_ate = data_ate_str ? parseDateInput(data_ate_str, true) : undefined; // true = final do dia
+
+    const metricas = await sheetsClient.getMetricas({ pipeline, responsavel, data_de, data_ate });
+    
+    // Montar descrição do período
+    let periodoDescricao = 'todos os tempos';
+    if (data_de_str && data_ate_str) {
+      if (data_de_str === data_ate_str) {
+        periodoDescricao = data_de_str; // Dia único
+      } else {
+        periodoDescricao = `${data_de_str} até ${data_ate_str}`;
+      }
+    } else if (data_de_str) {
+      periodoDescricao = `a partir de ${data_de_str}`;
+    } else if (data_ate_str) {
+      periodoDescricao = `até ${data_ate_str}`;
+    }
+    
+    return {
+      fonte: "Planilha de Eventos Vorp",
+      filtros: { periodo: periodoDescricao, pipeline, responsavel, data_de: data_de_str, data_ate: data_ate_str },
+      metricas: {
+        total_leads: metricas.total_leads,
+        agendados: metricas.agendados,
+        realizados: metricas.realizados,
+        propostas: metricas.propostas,
+        contratos: metricas.contratos,
+        vendas: metricas.vendas,
+        perdidos: metricas.perdidos,
+        valor_total_vendas: metricas.valor_total_vendas,
+        valor_total_vendas_formatado: formatarMoeda(metricas.valor_total_vendas),
+        valor_total_contratos: metricas.valor_total_contratos,
+        valor_total_contratos_formatado: formatarMoeda(metricas.valor_total_contratos),
+        ticket_medio: metricas.ticket_medio,
+        ticket_medio_formatado: formatarMoeda(metricas.ticket_medio),
+        taxa_conversao_reuniao: metricas.taxa_conversao_reuniao,
+        taxa_conversao_reuniao_formatada: `${metricas.taxa_conversao_reuniao}%`,
+        taxa_conversao_venda: metricas.taxa_conversao_venda,
+        taxa_conversao_venda_formatada: `${metricas.taxa_conversao_venda}%`,
+      },
+      // Lista de leads (máximo 10 por categoria)
+      leads_vendas: metricas.leads_vendas?.map(l => ({
+        id: l.id_lead,
+        nome: l.nome,
+        pipeline: l.pipeline,
+        closer: l.closer_responsavel,
+        valor: l.valor_venda ? formatarMoeda(l.valor_venda) : null,
+        data: l.data_ultimo_evento,
+        url: l.url_lead,
+      })),
+      leads_propostas: metricas.leads_propostas?.map(l => ({
+        id: l.id_lead,
+        nome: l.nome,
+        pipeline: l.pipeline,
+        closer: l.closer_responsavel,
+        valor_contrato: l.valor_contrato ? formatarMoeda(l.valor_contrato) : null,
+        data: l.data_ultimo_evento,
+        url: l.url_lead,
+      })),
+      resumo: `📊 Total: ${metricas.total_leads} leads | ` +
+              `✅ Vendas: ${metricas.vendas} leads (${formatarMoeda(metricas.valor_total_vendas)}) | ` +
+              `📈 Conversão: ${metricas.taxa_conversao_venda}%`,
+    };
+  },
+
+  // Buscar evento por ID
+  vorp_planilha_buscar_evento: async (params, _client) => {
+    const evento_id = params.evento_id as string;
+    
+    if (!evento_id) {
+      throw new Error("evento_id é obrigatório");
+    }
+
+    const evento = await sheetsClient.getEventoById(evento_id);
+    
+    if (!evento) {
+      return {
+        encontrado: false,
+        message: `Evento com ID "${evento_id}" não encontrado na planilha`,
+      };
+    }
+    
+    return {
+      fonte: "Planilha de Eventos Vorp",
+      encontrado: true,
+      evento: formatEventoParaResposta(evento),
     };
   },
 };
 
-// ========== MCP Protocol Handler ==========
-async function handleMCPRequest(
-  mcpRequest: MCPRequest,
-  kommoBaseUrl: string,
-  kommoAccessToken: string
-): Promise<MCPResponse> {
-  const { id, method, params } = mcpRequest;
-  const client = createKommoClient(kommoBaseUrl, kommoAccessToken);
+// ========== Funções Auxiliares ==========
 
-  try {
-    switch (method) {
-      case "initialize":
-        return {
-          jsonrpc: "2.0",
-          id,
-          result: {
-            protocolVersion: MCP_PROTOCOL_VERSION,
-            capabilities: {
-              tools: {},
-              sampling: {},
-            },
-            serverInfo: SERVER_INFO,
-          },
-        };
+// Formatar evento da planilha para resposta
+function formatEventoParaResposta(evento: PlanilhaEvento) {
+  return {
+    id_evento: evento.id_evento,
+    id_lead: evento.id_lead,
+    nome_lead: evento.nome_lead,
+    status: evento.status_agendamento,
+    tipo_evento: evento.tipo_evento,
+    pipeline: evento.pipeline,
+    
+    // Responsáveis
+    sdr_responsavel: evento.sdr_responsavel,
+    closer_responsavel: evento.closer_responsavel,
+    
+    // Datas importantes
+    data_reuniao_agendada: evento.data_reuniao_agendada,
+    data_evento: evento.data_evento,
+    data_reuniao_realizada: evento.data_registro_reuniao_realizada,
+    data_proposta: evento.data_registro_proposta_enviada,
+    data_contrato: evento.data_registro_contrato_enviado,
+    data_venda: evento.data_registro_venda,
+    data_perdido: evento.data_registro_perdido,
+    
+    // Valores
+    valor_venda: evento.valor_venda,
+    valor_venda_formatado: evento.valor_venda ? formatarMoeda(evento.valor_venda) : null,
+    valor_contrato: evento.valor_contrato,
+    valor_contrato_formatado: evento.valor_contrato ? formatarMoeda(evento.valor_contrato) : null,
+    produto: evento.produto,
+    motivo_perdido: evento.motivo_perdido,
+    
+    // Contato
+    contato: {
+      nome: evento.nome_contato,
+      telefone: evento.telefone_contato,
+      email: evento.email_contato,
+      cargo: evento.cargo_contato,
+    },
+    
+    // Origem
+    origem: evento.origem_lead,
+    canal_agendamento: evento.canal_agendamento,
+    
+    // URL para acesso rápido no Kommo
+    url_lead: evento.url_lead,
+  };
+}
 
-      case "notifications/initialized":
-        return { jsonrpc: "2.0", id, result: {} };
+// Formatar valor em reais
+function formatarMoeda(valor: number): string {
+  return valor.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+}
 
-      case "sampling/createMessage": {
-        // O agente quer pedir aprovação ao usuário
-        const samplingParams = params as {
-          messages: Array<{ role: string; content: { type: string; text: string } }>;
-          maxTokens: number;
-        };
-        
-        // Extrair a mensagem do agente para o usuário
-        const agentMessage = samplingParams.messages
-          .filter((m) => m.role === "assistant")
-          .map((m) => m.content.text)
-          .join("\n");
-        
-        return {
-          jsonrpc: "2.0",
-          id,
-          result: {
-            role: "assistant",
-            content: {
-              type: "text",
-              text: agentMessage || "Você gostaria de prosseguir com esta operação?",
-            },
-            model: "user-approval",
-            stopReason: "endTurn",
-          },
-        };
-      }
-
-      case "tools/list": {
-        // Gerar tool definitions dinamicamente com informações do CRM
-        const toolDefinitions = await generateToolDefinitions(client);
-        return {
-          jsonrpc: "2.0",
-          id,
-          result: {
-            tools: toolDefinitions,
-          },
-        };
-      }
-
-      case "tools/call": {
-        const toolParams = params as { name: string; arguments?: Record<string, unknown> };
-        const toolName = toolParams.name;
-        const toolArgs = toolParams.arguments || {};
-
-        const handler = toolHandlers[toolName];
-        if (!handler) {
-          return {
-            jsonrpc: "2.0",
-            id,
-            error: {
-              code: JSON_RPC_ERRORS.METHOD_NOT_FOUND,
-              message: ERROR_MESSAGES.TOOL_NOT_FOUND(toolName),
-            },
-          };
-        }
-
-        const result = await handler(toolArgs, client);
-
-        return {
-          jsonrpc: "2.0",
-          id,
-          result: {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(result, null, 2),
-              },
-            ],
-          },
-        };
-      }
-
-      default:
-        return {
-          jsonrpc: "2.0",
-          id,
-          error: {
-            code: JSON_RPC_ERRORS.METHOD_NOT_FOUND,
-            message: ERROR_MESSAGES.METHOD_NOT_SUPPORTED(method),
-          },
-        };
+// Converter input de data para Date
+// isEndOfDay: se true, define horário como 23:59:59 (para filtros data_ate)
+function parseDateInput(dateStr: string, isEndOfDay: boolean = false): Date {
+  let date: Date;
+  
+  // Tentar formato ISO (YYYY-MM-DD ou YYYY-MM-DDTHH:mm:ss)
+  if (dateStr.includes('-')) {
+    date = new Date(dateStr);
+  } else {
+    // Tentar formato BR (DD/MM/YYYY)
+    const match = dateStr.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+    if (match) {
+      const [, day, month, year] = match;
+      date = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+    } else {
+      date = new Date(dateStr);
     }
-  } catch (error) {
-    return {
-      jsonrpc: "2.0",
-      id,
-      error: {
-        code: JSON_RPC_ERRORS.SERVER_ERROR,
-        message: error instanceof Error ? error.message : "Internal server error",
-      },
-    };
-  }
-}
-
-// Validar Bearer Token
-const SECRET_PASSWORD = process.env.MCP_PASSWORD;
-
-if (!SECRET_PASSWORD) {
-  throw new Error('MCP_PASSWORD environment variable is required');
-}
-
-interface AuthResult {
-  valid: boolean;
-  subdomain?: string;
-  kommoBaseUrl?: string;
-  kommoAccessToken?: string;
-}
-
-function validateAuth(authHeader: string | undefined): AuthResult {
-  if (!authHeader) {
-    return { valid: false };
   }
   
-  const [type, token] = authHeader.split(" ");
-  
-  if (type !== "Bearer" || !token) {
-    return { valid: false };
+  // Se é data final (data_ate), definir horário como final do dia
+  if (isEndOfDay) {
+    date.setHours(23, 59, 59, 999);
   }
   
-  const parts = token.split("|");
-  
-  if (parts.length !== 3) {
-    return { valid: false };
-  }
-  
-  const [password, subdomain, kommoAccessToken] = parts;
-  
-  // Validar apenas a senha - o Kommo validará o resto
-  if (password !== SECRET_PASSWORD) {
-    return { valid: false };
-  }
-  
-  const kommoBaseUrl = `https://${subdomain}.kommo.com`;
-  
-  return { valid: true, subdomain, kommoBaseUrl, kommoAccessToken };
+  return date;
 }
 
 // ========== Fastify Server ==========
-async function startServer() {
-  const fastify = Fastify({ logger: true });
+const app = Fastify({ logger: true });
 
-  // CORS
-  await fastify.register(cors, {
-    origin: '*',
-    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Mcp-Session-Id'],
-  });
+await app.register(cors, {
+  origin: true,
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+});
 
-  // Health check
-  fastify.get('/', async () => {
-    return {
-      status: 'ok',
-      version: SERVER_INFO.version,
-      name: SERVER_INFO.name,
-      transport: 'streamable-http',
-      tools: toolNames,
-    };
-  });
-
-  fastify.get('/health', async () => {
-    return { status: 'ok', timestamp: new Date().toISOString() };
-  });
-
-  // ========== MCP Endpoint ==========
-  fastify.post('/mcp', async (request: FastifyRequest, reply: FastifyReply) => {
-    // Log para debug
-    fastify.log.info({
-      authorization: request.headers.authorization,
-      allHeaders: Object.keys(request.headers)
-    }, 'MCP request headers');
-    
-    const auth = validateAuth(request.headers.authorization);
-    
-    if (!auth.valid || !auth.kommoBaseUrl || !auth.kommoAccessToken) {
-      reply.code(401);
-      return { 
-        jsonrpc: "2.0",
-        id: null,
-        error: { 
-          code: 401, 
-          message: ERROR_MESSAGES.UNAUTHORIZED 
-        } 
-      };
-    }
-
-    try {
-      const parsed = request.body;
-      
-      // Validar se é um array ou objeto único
-      const messages: MCPRequest[] = isMCPRequestArray(parsed) ? parsed : [parsed as MCPRequest];
-      
-      const responses: MCPResponse[] = [];
-      
-      for (const msg of messages) {
-        // Validar cada mensagem
-        const validation = mcpRequestSchema.safeParse(msg);
-        if (!validation.success) {
-          responses.push({
-            jsonrpc: "2.0",
-            id: (msg as any).id || null,
-            error: {
-              code: JSON_RPC_ERRORS.INVALID_REQUEST,
-              message: validation.error.message,
-            },
-          });
-          continue;
-        }
-        
-        const response = await handleMCPRequest(validation.data, auth.kommoBaseUrl, auth.kommoAccessToken);
-        if (msg.id !== undefined && msg.id !== null) {
-          responses.push(response);
-        }
-      }
-
-      return responses.length === 1 ? responses[0] : responses;
-    } catch (error) {
-      fastify.log.error(error);
-      reply.code(400);
-      return {
-        jsonrpc: "2.0",
-        id: null,
-        error: {
-          code: JSON_RPC_ERRORS.PARSE_ERROR,
-          message: "Parse error",
-        },
-      };
-    }
-  });
-
-  fastify.delete('/mcp', async (request: FastifyRequest, reply: FastifyReply) => {
-    reply.code(204);
-    return;
-  });
-
-  // ========== Legacy REST API ==========
-  fastify.get('/tools', async (request: FastifyRequest, reply: FastifyReply) => {
-    const auth = validateAuth(request.headers.authorization);
-    
-    if (!auth.valid || !auth.kommoBaseUrl || !auth.kommoAccessToken) {
-      reply.code(401);
-      return { error: true, message: ERROR_MESSAGES.UNAUTHORIZED };
-    }
-
-    const client = createKommoClient(auth.kommoBaseUrl, auth.kommoAccessToken);
-    const toolDefinitions = await generateToolDefinitions(client);
-    return { tools: toolDefinitions };
-  });
-
-  fastify.post('/execute', async (request: FastifyRequest, reply: FastifyReply) => {
-    const auth = validateAuth(request.headers.authorization);
-    
-    if (!auth.valid || !auth.kommoBaseUrl || !auth.kommoAccessToken) {
-      reply.code(401);
-      return { error: true, message: ERROR_MESSAGES.UNAUTHORIZED };
-    }
-
-    try {
-      const validation = executeRequestSchema.safeParse(request.body);
-      
-      if (!validation.success) {
-        reply.code(400);
-        return { 
-          error: true, 
-          message: `Invalid request: ${validation.error.message}` 
-        };
-      }
-      
-      const { tool: toolName, params = {} } = validation.data;
-
-      const handler = toolHandlers[toolName];
-      if (!handler) {
-        reply.code(404);
-        return { error: true, message: ERROR_MESSAGES.TOOL_NOT_FOUND(toolName) };
-      }
-
-      const client = createKommoClient(auth.kommoBaseUrl, auth.kommoAccessToken);
-      const result = await handler(params, client);
-
-      return { success: true, data: result };
-    } catch (error) {
-      fastify.log.error(error);
-      reply.code(500);
-      const message = error instanceof Error ? error.message : "Unknown error";
-      return { error: true, message };
-    }
-  });
-
-  // Start server
-  const PORT = parseInt(process.env.PORT || String(SERVER_CONFIG.DEFAULT_PORT), 10);
-  const HOST = process.env.HOST || SERVER_CONFIG.DEFAULT_HOST;
-
-  try {
-    await fastify.listen({ port: PORT, host: HOST });
-    console.log(`🚀 Kommo MCP Server running on http://${HOST}:${PORT}`);
-    console.log(`📋 Available tools: ${toolNames.length}`);
-  } catch (err) {
-    fastify.log.error(err);
-    process.exit(1);
+// Autenticação
+function parseAuthToken(authHeader: string | undefined): { password: string; subdomain: string; kommoToken: string } | null {
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return null;
   }
+  const token = authHeader.substring(7);
+  const parts = token.split("|");
+  if (parts.length !== 3) {
+    return null;
+  }
+  return { password: parts[0], subdomain: parts[1], kommoToken: parts[2] };
 }
 
+// Health check
+app.get("/health", async () => ({ status: "ok", server: SERVER_INFO.name }));
+
+// Endpoint SSE para eventos (compatibilidade MCP)
+app.get("/sse", async (request: FastifyRequest, reply: FastifyReply) => {
+  reply.raw.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "Access-Control-Allow-Origin": "*",
+  });
+
+  reply.raw.write(`data: {"type":"endpoint","url":"/mcp"}\n\n`);
+  
+  const keepAlive = setInterval(() => {
+    reply.raw.write(": keep-alive\n\n");
+  }, 30000);
+
+  request.raw.on("close", () => {
+    clearInterval(keepAlive);
+  });
+});
+
+// Endpoint principal MCP
+app.post("/mcp", async (request: FastifyRequest, reply: FastifyReply) => {
+  const auth = parseAuthToken(request.headers.authorization);
+  if (!auth) {
+    return reply.status(401).send({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: JSON_RPC_ERRORS.SERVER_ERROR, message: ERROR_MESSAGES.INVALID_TOKEN_FORMAT },
+    });
+  }
+
+  const client = createKommoClient(`https://${auth.subdomain}.kommo.com`, auth.kommoToken);
+
+  // Suporte a batch requests
+  const isBatch = isMCPRequestArray(request.body);
+  const requests = isBatch ? (request.body as MCPRequest[]) : [request.body as MCPRequest];
+  
+  const responses: MCPResponse[] = [];
+
+  for (const req of requests) {
+    try {
+      const parsed = mcpRequestSchema.safeParse(req);
+      if (!parsed.success) {
+        responses.push({
+          jsonrpc: "2.0",
+          id: req.id ?? 0,
+          error: { code: JSON_RPC_ERRORS.INVALID_REQUEST, message: "Invalid request format" },
+        });
+        continue;
+      }
+
+      const { id, method, params } = parsed.data;
+
+      let result: unknown;
+
+      switch (method) {
+        case "initialize":
+          result = {
+            protocolVersion: MCP_PROTOCOL_VERSION,
+            capabilities: { tools: { listChanged: true } },
+            serverInfo: SERVER_INFO,
+          };
+          break;
+
+        case "notifications/initialized":
+          result = {};
+          break;
+
+        case "tools/list":
+          const tools = await generateToolDefinitions(client);
+          result = { tools };
+          break;
+
+        case "tools/call":
+          const toolName = (params as any)?.name;
+          const toolArgs = (params as any)?.arguments || {};
+
+          if (!toolName || !toolHandlers[toolName]) {
+            throw new Error(ERROR_MESSAGES.TOOL_NOT_FOUND(toolName));
+          }
+
+          result = { content: [{ type: "text", text: JSON.stringify(await toolHandlers[toolName](toolArgs, client), null, 2) }] };
+          break;
+
+        default:
+          throw new Error(ERROR_MESSAGES.METHOD_NOT_SUPPORTED(method));
+      }
+
+      responses.push({ jsonrpc: "2.0", id, result });
+    } catch (error) {
+      responses.push({
+        jsonrpc: "2.0",
+        id: req.id ?? 0,
+        error: {
+          code: JSON_RPC_ERRORS.INTERNAL_ERROR,
+          message: error instanceof Error ? error.message : "Unknown error",
+        },
+      });
+    }
+  }
+
+  return isBatch ? responses : responses[0];
+});
+
 // Iniciar servidor
-startServer();
+const port = parseInt(process.env.PORT || String(SERVER_CONFIG.DEFAULT_PORT));
+const host = process.env.HOST || SERVER_CONFIG.DEFAULT_HOST;
+
+try {
+  await app.listen({ port, host });
+  console.log(`\n🚀 Vorp MCP Server rodando em http://${host}:${port}`);
+  console.log(`📊 Funis disponíveis: SDR, BDR, CLOSERS`);
+  console.log(`🎯 Grupo Vorp: Construindo negócios fortes e escaláveis\n`);
+} catch (err) {
+  app.log.error(err);
+  process.exit(1);
+}

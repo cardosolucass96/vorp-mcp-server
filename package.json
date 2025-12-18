@@ -1,7 +1,7 @@
 {
-  "name": "kommo-mcp-server",
+  "name": "vorp-mcp-server",
   "version": "1.0.0",
-  "description": "MCP Server para integração com Kommo CRM",
+  "description": "MCP Server especializado para agente comercial do Grupo Vorp - Construindo negócios fortes e escaláveis",
   "main": "dist/server.js",
   "type": "module",
   "scripts": {
@@ -15,11 +15,16 @@
     "mcp",
     "kommo",
     "crm",
+    "grupo-vorp",
+    "vendas",
+    "sdr",
+    "bdr",
+    "closers",
     "model-context-protocol",
     "fastify",
     "nodejs"
   ],
-  "author": "",
+  "author": "Grupo Vorp",
   "license": "MIT",
   "dependencies": {
     "@fastify/cors": "^10.0.1",

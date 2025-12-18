@@ -1,6 +1,6 @@
 /**
- * Cliente Kommo para Cloudflare Workers
- * Usa fetch nativo ao invés de axios
+ * Cliente Kommo para o MCP Server Vorp
+ * Usa fetch nativo para requisições à API do Kommo CRM
  */
 
 export interface KommoClientInterface {
@@ -25,7 +25,11 @@ export function createKommoClient(baseUrl: string, accessToken: string): KommoCl
       const searchParams = new URLSearchParams();
       for (const [key, value] of Object.entries(params)) {
         if (value !== undefined && value !== null) {
-          searchParams.append(key, String(value));
+          if (Array.isArray(value)) {
+            value.forEach((v, i) => searchParams.append(`${key}[${i}]`, String(v)));
+          } else {
+            searchParams.append(key, String(value));
+          }
         }
       }
       url += `?${searchParams.toString()}`;
@@ -65,14 +69,14 @@ export function createKommoClient(baseUrl: string, accessToken: string): KommoCl
     const messages: Record<number, string> = {
       400: `Requisição inválida: ${detail}`,
       401: "Token expirado ou inválido. Gere um novo token no Kommo.",
-      403: "Acesso negado. Verifique as permissões.",
-      404: "Recurso não encontrado. Verifique o ID.",
+      403: "Acesso negado. Verifique as permissões do usuário.",
+      404: "Recurso não encontrado. Verifique o ID informado.",
       422: `Dados inválidos: ${detail}`,
-      429: "Limite de requisições excedido. Aguarde.",
+      429: "Limite de requisições excedido. Aguarde alguns segundos.",
       500: "Erro interno do Kommo. Tente novamente.",
-      502: "Kommo indisponível. Tente novamente.",
+      502: "Kommo indisponível. Tente novamente em alguns minutos.",
       503: "Kommo em manutenção. Aguarde.",
-      504: "Timeout. Tente novamente.",
+      504: "Timeout na requisição. Tente novamente.",
     };
 
     return messages[status] || `Erro HTTP ${status}: ${detail}`;

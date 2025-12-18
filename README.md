@@ -1,171 +1,109 @@
-# Kommo MCP Server
+# Vorp MCP Server
 
-Servidor MCP (Model Context Protocol) para integração com o CRM Kommo via Fastify + Node.js.
+Servidor MCP (Model Context Protocol) para o Agente Comercial do Grupo Vorp.
 
-## 🎯 Características
+Integra com **Kommo CRM** e **Google Sheets** para gerenciamento completo de leads nos funis SDR, BDR e Closers.
 
-- **Multi-tenant**: Suporta múltiplas contas Kommo via token Bearer
-- **MCP over HTTP**: Protocolo JSON-RPC 2.0 (Streamable)
-- **Sistema de Aprovação**: Pede confirmação antes de operações em múltiplos registros (via sampling)
-- **Cache inteligente**: Pipelines e campos customizados cacheados
-- **Validação de entrada**: Schemas Zod para validação robusta de parâmetros
-- **Type-safe**: TypeScript com strict mode e tipagens completas
-- **Error handling**: Tratamento de erros estruturado com códigos JSON-RPC
-- **Logging**: Sistema de logs integrado com Fastify
-- **Segurança**: Validação de tokens, variáveis de ambiente obrigatórias
+## Ferramentas Disponíveis
 
-## 📦 Instalação
+| Ferramenta | Descrição |
+|------------|-----------|
+| `vorp_listar_leads` | Lista leads de um funil específico com filtros |
+| `vorp_buscar_lead` | Busca global por nome em todos os funis |
+| `vorp_buscar_lead_por_id` | Detalhes completos de um lead |
+| `vorp_atualizar_lead` | Atualiza campos de um lead |
+| `vorp_mover_lead` | Move lead entre etapas do funil |
+| `vorp_criar_lead` | Cria novo lead |
+| `vorp_criar_nota` | Adiciona nota a um lead |
+| `vorp_criar_tarefa` | Cria tarefa para um lead |
+| `vorp_listar_tarefas` | Lista tarefas de um lead |
+| `vorp_completar_tarefa` | Marca tarefa como concluída |
+| `vorp_listar_etapas` | Lista etapas de um funil |
+| `vorp_planilha_*` | Acesso à planilha de eventos pós-agendamento |
+
+## Instalação
 
 ```bash
 npm install
 npm run build
 ```
 
-## ⚙️ Configuração
-
-Crie um arquivo `.env` na raiz (copie de `.env.example`):
-
-```env
-PORT=3000
-HOST=0.0.0.0
-MCP_PASSWORD=SuaSenhaSegura123
-```
-
-⚠️ **IMPORTANTE**: 
-- `MCP_PASSWORD` é **OBRIGATÓRIO** - o servidor não inicia sem ele
-- Nunca use senhas fracas ou padrão em produção
-- Nunca commite o arquivo `.env` com credenciais reais
-
-## 🚀 Executar localmente
+## Execução
 
 ```bash
-# Desenvolvimento (inicia servidor + MCP Inspector)
-npm run dev
-
-# Apenas o servidor
-npm start
-
-# Build + Servidor (sem inspector)
-npm run build && npm start
-
-# Watch mode (recompila automaticamente)
-npm run dev:watch
-
-# Apenas MCP Inspector
-npm run inspector
-```
-
-Quick start:
-
-```bash
-# Instalar dependências
-npm install
-
-# Desenvolvimento (servidor + inspector)
+# Desenvolvimento
 npm run dev
 
 # Produção
-npm run build
 npm start
 ```
 
-## 🔐 Autenticação
+O servidor inicia na porta `3000` por padrão.
 
-Formato do token Bearer:
-```
-MCP_PASSWORD|subdomain|kommoAccessToken
-```
-
-Exemplo:
-```bash
-curl -H "Authorization: Bearer Admin123|mpcamotestecom|eyJ0eXAi..." \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
-     http://localhost:3000/mcp
-```
-
-## 📡 Endpoints
-
-| Método | Endpoint | Descrição |
-|--------|----------|-----------|
-| GET | `/` | Health check |
-| GET | `/health` | Health check |
-| POST | `/mcp` | MCP Protocol (JSON-RPC 2.0) |
-| DELETE | `/mcp` | Encerrar sessão |
-| GET | `/tools` | Listar ferramentas (legacy) |
-| POST | `/execute` | Executar ferramenta (legacy) |
-
-## 🔧 Ferramentas Disponíveis
-
-| Ferramenta | Descrição | Validação |
-|------------|-----------|-----------|
-| `kommo_list_leads` | Lista/busca leads | ✅ Zod schema |
-| `kommo_update_lead` | Atualiza lead (nome, preço, status, campos customizados) | ✅ Zod schema |
-| `kommo_add_notes` | Adiciona notas ao lead | ✅ Zod schema |
-| `kommo_add_tasks` | Cria tarefas/lembretes | ✅ Zod schema |
-| `kommo_list_pipelines` | Lista pipelines e estágios (cached) | - |
-| `kommo_list_pipeline_stages` | Lista estágios de um pipeline (cached) | ✅ Zod schema |
-| `kommo_list_lead_custom_fields` | Lista campos customizados (cached) | - |
-
-### Cache
-- **Pipelines**: 10 minutos
-- **Estágios**: 10 minutos
-- **Campos customizados**: 1 hora
-
-## 🔄 Uso com n8n
-
-```
-1. kommo_start_session  → Inicia atendimento com lead
-2. kommo_update_lead    → Modifica dados
-3. kommo_add_notes      → Registra observações
-4. kommo_add_tasks      → Cria follow-ups
-5. kommo_end_session    → Encerra atendimento
-```
-
-## ⚠️ Boas Práticas e Segurança
-
-### Segurança
-- ✅ Senha obrigatória via variável de ambiente
-- ✅ Validação de entrada com Zod schemas
-- ✅ Tokens multi-parte com validação
-- ✅ Error handling estruturado
-- ✅ Logs de erros com Fastify
-
-### Desenvolvimento
-- ✅ TypeScript com strict mode
-- ✅ Tipagens completas (FastifyRequest, FastifyReply)
-- ✅ Constantes centralizadas em arquivo separado
-- ✅ Schemas de validação reutilizáveis
-- ✅ Cache configurável por TTL
-
-### Código Limpo
-- ✅ Separação de responsabilidades (types, schemas, constants)
-- ✅ Error codes padronizados (JSON-RPC 2.0)
-- ✅ Mensagens de erro descritivas
-- ✅ Validação early-return
-
-### Documentação
-- 📄 `README.md` - Visão geral e setup
-- 📄 `USAGE.md` - Exemplos práticos de uso com curl
-- 📄 `APPROVAL-SYSTEM.md` - Sistema de aprovação para operações em múltiplos registros
-- 📄 `src/constants.ts` - Constantes e configurações
-- 📄 `src/schemas.ts` - Schemas de validação
-
-## 🔐 Sistema de Aprovação
-
-O servidor implementa um sistema de aprovação via **MCP sampling** para operações que afetam múltiplos registros. Quando você executa comandos como "adicione nota em lucas cardoso" e existem 2 ou mais leads com esse nome, o agente **pedirá aprovação** antes de executar.
-
-**Consulte `APPROVAL-SYSTEM.md` para detalhes completos.**
-
-## 🛠️ Desenvolvimento
+## Docker
 
 ```bash
 # Build
-npm run build
+docker build -t vorp-mcp .
 
-# Dev mode
-npm run dev
-
-# Watch mode
-npm run dev:watch
+# Run
+docker run -p 3000:3000 vorp-mcp
 ```
+
+## Variáveis de Ambiente
+
+| Variável | Padrão | Descrição |
+|----------|--------|-----------|
+| `PORT` | `3000` | Porta do servidor |
+| `HOST` | `0.0.0.0` | Host do servidor |
+
+## Prompt do Agente
+
+Veja os arquivos de prompt para configurar o agente:
+
+- `prompt-system.md` - Versão completa com exemplos
+- `prompt-system-compact.md` - Versão compacta para produção
+
+## Estrutura
+
+```
+├── src/
+│   ├── server.ts          # Servidor principal + handlers MCP
+│   ├── schemas.ts          # Schemas Zod
+│   ├── constants.ts        # Constantes (funis, etapas)
+│   ├── kommo/              # Cliente Kommo API
+│   │   ├── clientCF.ts
+│   │   └── types.ts
+│   └── sheets/             # Cliente Google Sheets
+│       └── client.ts
+├── Dockerfile
+├── package.json
+├── tsconfig.json
+└── prompt-system.md
+```
+
+## Licença
+
+MIT - Grupo Vorp
+
+
+
+class Carro {
+     String marca;
+     int ano;
+
+     def getMarcaCarro(){
+          return self.marca;
+     }
+
+     def toString(){
+          return f"self.marca + self.ano"
+     }
+}
+
+
+Carro carro1;
+carro1.marca = "tesla"
+
+print(carro1.getMarcaCarro())
+print(carro1)
