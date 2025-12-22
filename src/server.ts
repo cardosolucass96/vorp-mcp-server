@@ -882,38 +882,37 @@ Para atualizar o email/telefone de uma pessoa vinculada a um lead, você precisa
 
     {
       name: "vorp_planilha_listar_eventos",
-      description: `📊 PLANILHA DE EVENTOS - FONTE DE VERDADE PARA MÉTRICAS COMERCIAIS
+      description: `📊 LISTA EVENTOS DA PLANILHA VORP (FONTE DE VERDADE PÓS-AGENDAMENTO)
 
-🚨 OBRIGATÓRIO USAR ESTA FERRAMENTA QUANDO O USUÁRIO PERGUNTAR:
-- "Como foi o fechamento?" → Use tipo_evento="Venda realizada"
-- "Quantas vendas/fechamentos?" → Use tipo_evento="Venda realizada"
-- "Quantas reuniões realizadas?" → Use tipo_evento="Reunião Realizada"
-- "Quantas propostas enviadas?" → Use tipo_evento="Proposta enviada"
-- "Quantos agendamentos?" → Use tipo_evento="Agendamento"
-- "Resultados da semana/mês" → Use esta ferramenta COM as datas
-- "Reuniões agendadas para amanhã" → Use data_reuniao_de/data_reuniao_ate
+⚠️ IMPORTANTE: Para consultas de etapas pós-agendamento (reuniões agendadas, realizadas, propostas, contratos, vendas), USE ESTA FERRAMENTA ao invés de buscar no Kommo!
 
-⚠️ NÃO USE O CRM (vorp_listar_leads) PARA MÉTRICAS! A planilha é a fonte correta.
+A Planilha de Eventos é a fonte de verdade para:
+- Reuniões agendadas e realizadas
+- Propostas enviadas
+- Contratos enviados
+- Vendas fechadas
+- Leads perdidos pós-reunião
 
-📋 MAPEAMENTO DE TERMOS:
-- "fechamento" / "vendas" / "ganhos" → tipo_evento="Venda realizada"
-- "reunião" / "call" / "meet" → tipo_evento="Reunião Realizada"
-- "proposta" / "orçamento" → tipo_evento="Proposta enviada"
-- "contrato" → tipo_evento="Contrato enviado"
-- "agendamento" / "marcação" → tipo_evento="Agendamento"
+📋 FILTROS DISPONÍVEIS:
+- tipo_evento: Agendamento, Reunião Realizada, Proposta enviada, Contrato enviado, Venda realizada
+- pipeline: SDR, BDR, CLOSERS ou MATCH_SALES
+- sdr_responsavel/closer_responsavel: Nome do responsável
+- data_de/data_ate: Filtra pela "Data do evento" (quando aconteceu)
+- data_reuniao_de/data_reuniao_ate: Filtra pela "Data da reunião agendada" (quando vai acontecer)
+- lead_id: Buscar eventos de um lead específico
 
-📅 FILTROS DE DATA:
-- data_de/data_ate: Para eventos que JÁ ACONTECERAM (passado)
-- data_reuniao_de/data_reuniao_ate: Para reuniões FUTURAS (agendadas)
+📅 PARA REUNIÕES FUTURAS: Use data_reuniao_de e data_reuniao_ate
+Exemplo "reuniões agendadas para amanhã": tipo_evento="Agendamento", data_reuniao_de="19/12/2025", data_reuniao_ate="19/12/2025"
 
-Exemplo "fechamentos da última sexta": tipo_evento="Venda realizada", data_de="20/12/2025", data_ate="20/12/2025"`,
+📅 PARA EVENTOS PASSADOS: Use data_de e data_ate
+Exemplo "agendamentos de ontem": tipo_evento="Agendamento", data_de="17/12/2025", data_ate="17/12/2025"`,
       inputSchema: {
         type: "object",
         properties: {
           tipo_evento: { 
             type: "string",
             enum: ["Agendamento", "Reunião Realizada", "Proposta enviada", "Contrato enviado", "Venda realizada"],
-            description: "Tipo do evento. Para 'fechamento' use 'Venda realizada'." 
+            description: "Tipo do evento que aconteceu" 
           },
           pipeline: { 
             type: "string", 
@@ -1046,61 +1045,6 @@ Retorna todos os detalhes de um evento específico quando você já conhece o ID
         required: ["evento_id"],
       },
     },
-
-    // ========== FERRAMENTA DE MÉTRICAS (ATALHO PARA PLANILHA) ==========
-    {
-      name: "vorp_metricas",
-      description: `📊 CONSULTA MÉTRICAS COMERCIAIS - USE ESTA FERRAMENTA PARA RESULTADOS!
-
-🎯 USE SEMPRE QUE O USUÁRIO PERGUNTAR:
-- "Como foi o fechamento?" / "Quantas vendas?"
-- "Quantas reuniões realizadas/aconteceram?"
-- "Quantas propostas enviamos?"
-- "Resultados da semana/mês/dia"
-- "Performance do time"
-- "Quantos agendamentos?"
-
-Esta ferramenta consulta a PLANILHA DE EVENTOS (fonte de verdade pós-agendamento).
-
-📋 TIPOS DE MÉTRICAS:
-- fechamento / vendas → tipo="vendas"
-- reuniões realizadas → tipo="reunioes"
-- propostas enviadas → tipo="propostas"
-- contratos enviados → tipo="contratos"
-- agendamentos → tipo="agendamentos"
-- todas as métricas → tipo="resumo"
-
-📅 DATAS: Calcule as datas exatas baseado na pergunta do usuário.
-Exemplo: "fechamentos da última sexta" → data_de="20/12/2025", data_ate="20/12/2025"`,
-      inputSchema: {
-        type: "object",
-        properties: {
-          tipo: { 
-            type: "string",
-            enum: ["vendas", "reunioes", "propostas", "contratos", "agendamentos", "resumo"],
-            description: "Tipo de métrica. 'vendas' = fechamentos, 'resumo' = todas as métricas" 
-          },
-          data_de: {
-            type: "string",
-            description: "Data inicial (DD/MM/YYYY). OBRIGATÓRIO."
-          },
-          data_ate: {
-            type: "string",
-            description: "Data final (DD/MM/YYYY). OBRIGATÓRIO."
-          },
-          pipeline: { 
-            type: "string", 
-            enum: ["SDR", "BDR", "CLOSERS", "MATCH_SALES"],
-            description: "Filtrar por pipeline/funil (opcional)" 
-          },
-          responsavel: { 
-            type: "string", 
-            description: "Nome do responsável (opcional)" 
-          },
-        },
-        required: ["tipo", "data_de", "data_ate"],
-      },
-    },
   ];
 }
 
@@ -1126,8 +1070,6 @@ const toolNames = [
   "vorp_planilha_eventos_lead",
   "vorp_planilha_metricas",
   "vorp_planilha_buscar_evento",
-  // Atalho para métricas (mais intuitivo)
-  "vorp_metricas",
 ];
 
 // ========== Tool Handlers ==========
@@ -2163,115 +2105,6 @@ const toolHandlers: Record<string, ToolHandler> = {
       fonte: "Planilha de Eventos Vorp",
       encontrado: true,
       evento: formatEventoParaResposta(evento),
-    };
-  },
-
-  // ========== VORP_METRICAS - Atalho intuitivo para métricas ==========
-  vorp_metricas: async (params, _client) => {
-    const tipo = params.tipo as string;
-    const data_de = params.data_de as string;
-    const data_ate = params.data_ate as string;
-    const pipeline = params.pipeline as string | undefined;
-    const responsavel = params.responsavel as string | undefined;
-
-    if (!tipo || !data_de || !data_ate) {
-      throw new Error("tipo, data_de e data_ate são obrigatórios");
-    }
-
-    // Mapear tipo para tipo_evento da planilha
-    const tipoMapping: Record<string, string | null> = {
-      'vendas': 'Venda realizada',
-      'reunioes': 'Reunião Realizada',
-      'propostas': 'Proposta enviada',
-      'contratos': 'Contrato enviado',
-      'agendamentos': 'Agendamento',
-      'resumo': null, // Busca todos os tipos
-    };
-
-    const tipoEvento = tipoMapping[tipo];
-    
-    // Construir filtros
-    const filters: Record<string, string> = {
-      data_de,
-      data_ate,
-    };
-    if (tipoEvento) filters.tipo_evento = tipoEvento;
-    if (pipeline) filters.pipeline = pipeline;
-    if (responsavel) {
-      filters.sdr_responsavel = responsavel;
-      filters.closer_responsavel = responsavel;
-    }
-
-    // Buscar eventos da planilha
-    const eventos = await sheetsClient.getEventos(filters);
-
-    // Se é resumo, calcular métricas agregadas
-    if (tipo === 'resumo') {
-      const agendamentos = eventos.filter(e => e.tipo_evento === 'Agendamento');
-      const reunioes = eventos.filter(e => e.tipo_evento === 'Reunião Realizada');
-      const propostas = eventos.filter(e => e.tipo_evento === 'Proposta enviada');
-      const contratos = eventos.filter(e => e.tipo_evento === 'Contrato enviado');
-      const vendas = eventos.filter(e => e.tipo_evento === 'Venda realizada');
-
-      const valorTotalVendas = vendas.reduce((acc, e) => acc + (e.valor_venda || 0), 0);
-
-      return {
-        fonte: "Planilha de Eventos Vorp",
-        periodo: { data_de, data_ate },
-        resumo: {
-          agendamentos: agendamentos.length,
-          reunioes_realizadas: reunioes.length,
-          propostas_enviadas: propostas.length,
-          contratos_enviados: contratos.length,
-          vendas_realizadas: vendas.length,
-          valor_total_vendas: valorTotalVendas,
-          valor_total_vendas_formatado: formatarMoeda(valorTotalVendas),
-        },
-        taxa_conversao: {
-          reuniao_para_proposta: reunioes.length > 0 
-            ? `${((propostas.length / reunioes.length) * 100).toFixed(1)}%` 
-            : 'N/A',
-          proposta_para_venda: propostas.length > 0 
-            ? `${((vendas.length / propostas.length) * 100).toFixed(1)}%` 
-            : 'N/A',
-        },
-      };
-    }
-
-    // Para tipos específicos, retornar lista de eventos
-    const tipoLabel = {
-      'vendas': 'Vendas/Fechamentos',
-      'reunioes': 'Reuniões Realizadas',
-      'propostas': 'Propostas Enviadas',
-      'contratos': 'Contratos Enviados',
-      'agendamentos': 'Agendamentos',
-    }[tipo] || tipo;
-
-    const valorTotal = tipo === 'vendas' 
-      ? eventos.reduce((acc, e) => acc + (e.valor_venda || 0), 0) 
-      : null;
-
-    return {
-      fonte: "Planilha de Eventos Vorp",
-      tipo_metrica: tipoLabel,
-      periodo: { data_de, data_ate },
-      total: eventos.length,
-      valor_total: valorTotal,
-      valor_total_formatado: valorTotal ? formatarMoeda(valorTotal) : null,
-      eventos: eventos.slice(0, 50).map(e => ({
-        nome_lead: e.nome_lead,
-        id_lead: e.id_lead,
-        sdr_responsavel: e.sdr_responsavel,
-        closer_responsavel: e.closer_responsavel,
-        data_evento: e.data_evento,
-        valor_venda: e.valor_venda,
-        valor_venda_formatado: e.valor_venda ? formatarMoeda(e.valor_venda) : null,
-        pipeline: e.pipeline,
-        produto: e.produto,
-      })),
-      message: eventos.length > 50 
-        ? `Mostrando 50 de ${eventos.length} eventos. Use filtros para refinar.` 
-        : null,
     };
   },
 };
