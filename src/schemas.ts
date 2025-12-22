@@ -24,10 +24,11 @@ export const updateLeadSchema = z.object({
   name: z.string().optional().describe("Novo nome do lead"),
   price: z.number().optional().describe("Novo valor do lead em reais"),
   status_id: z.number().optional().describe("ID da nova etapa do funil"),
+  responsible_user_id: z.number().optional().describe("ID do usuário responsável (obtenha com vorp_listar_vendedores)"),
   custom_fields_values: z.array(z.object({
     field_id: z.number(),
     values: z.array(z.object({
-      value: z.union([z.string(), z.number(), z.boolean()]),
+      value: z.union([z.string(), z.number(), z.boolean()]).optional(),
       enum_id: z.number().optional(),
     })),
   })).optional().describe("Campos customizados a atualizar"),
@@ -90,6 +91,15 @@ export const getLeadEventsSchema = z.object({
   limit: z.number().optional().default(20).describe("Quantidade de eventos"),
 });
 
+// Schema para atualizar contato
+export const updateContactSchema = z.object({
+  contact_id: z.number().describe("ID do contato a ser atualizado"),
+  first_name: z.string().optional().describe("Primeiro nome do contato"),
+  last_name: z.string().optional().describe("Sobrenome do contato"),
+  phone: z.string().optional().describe("Telefone do contato (formato: +5585999991234)"),
+  email: z.string().optional().describe("Email do contato"),
+});
+
 // Mapa de schemas por ferramenta
 export const toolSchemas: Record<string, z.ZodSchema> = {
   vorp_listar_leads_funil: listLeadsFunnelSchema,
@@ -102,6 +112,7 @@ export const toolSchemas: Record<string, z.ZodSchema> = {
   vorp_buscar_lead_por_id: getLeadByIdSchema,
   vorp_buscar_por_telefone: searchByPhoneSchema,
   vorp_historico_lead: getLeadEventsSchema,
+  vorp_atualizar_contato: updateContactSchema,
 };
 
 // Função de validação

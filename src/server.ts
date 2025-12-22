@@ -249,113 +249,50 @@ async function getCustomFieldsCached(client: KommoClientInterface): Promise<Form
 
 // ========== Gerar descrição de campos customizados para a ferramenta de atualização ==========
 async function getCustomFieldsDescription(_client: KommoClientInterface): Promise<string> {
-  // Lista estática de campos prioritários com IDs e opções - baseado no lead 21383445
-  // Isso garante que a descrição seja rápida e consistente
+  // Descrição simplificada - força o agente a usar vorp_listar_campos_customizados para obter enum_ids
   
   let info = `
 
-📋 CAMPOS CUSTOMIZADOS DO LEAD:
+📋 CAMPOS CUSTOMIZADOS PRINCIPAIS:
+
+⚠️ IMPORTANTE: Para campos do tipo SELECT/MULTISELECT, você DEVE usar vorp_listar_campos_customizados 
+ANTES de atualizar para obter os enum_ids corretos! Não assuma valores.
 
 ═══════════════════════════════════════════════════════════════
 🗓️ REUNIÃO E AGENDAMENTO
 ═══════════════════════════════════════════════════════════════
-• Data e hora da reunião (1012642, date_time) → Unix timestamp em segundos
-• Link da reunião (1012648, url) → URL do Google Meet/Zoom
-• Reuniao Acontecida (1014589, select):
-  - Sim (1281851), Não (1281853)
-• Data reunião acontecida (1014591, date) → Unix timestamp
-• Temperatura do Lead (1019551, select):
-  - Frio (1286679), Morno (1286681), Quente (1286683)
-• Canal Marcado (1024629, select):
-  - Whatsapp (1291999), Api4com (1292001), 3cPlus (1292003)
+• Data e hora da reunião (1012642, date_time) → Unix timestamp
+• Link da reunião (1012648, url) → URL do Meet/Zoom
+• Reuniao Acontecida (1014589, select) → Use vorp_listar_campos_customizados
+• Temperatura do Lead (1019551, select) → Use vorp_listar_campos_customizados
 
 ═══════════════════════════════════════════════════════════════
-📋 QUALIFICAÇÃO E INFORMAÇÕES
+👥 RESPONSÁVEIS E ORIGEM
 ═══════════════════════════════════════════════════════════════
-• Dor (1024463, text) → Descrição da dor/problema do cliente
-• Rede social (1018247, text) → @usuario do Instagram
-• Informações da Ligação (1017075, textarea) → Resumo da conversa
-• Segmento (1014388, select):
-  - Comércio (1281600), Serviços (1281602), Indústria (1281604)
-  - Startups e Inovação (1286763), Varejo (1287493), Atacado (1287491)
-• Bant (1012658, multiselect):
-  - BUDGET (1280132), AUTHORITY (1280134), NEED (1280136), TIMING (1280138)
-• Prazo de reposta (1012654, date_time) → Quando cliente vai responder
-• Apresentação da proposta (1012656, date_time) → Quando apresentou/vai apresentar
-
-═══════════════════════════════════════════════════════════════
-👥 RESPONSÁVEIS E ATRIBUIÇÃO
-═══════════════════════════════════════════════════════════════
+• Canal/Origem (1013670, select) → ORIGEM DO LEAD (tráfego, indicação, outbound, etc)
+  ⚠️ Use vorp_listar_campos_customizados para ver opções!
 • Pré-Venda (1015049, select) → SDR responsável
 • Closer (1013954, select) → Closer que vai fechar
-• Canal (1013670, select) → ORIGEM DO LEAD - CONSULTE vorp_listar_campos_customizados para ver opcoes!
-  Exemplos: Gestao de Trafego, Indicacao, Outbound, etc
 
 ═══════════════════════════════════════════════════════════════
-📦 PRODUTO E VENDA
+📋 QUALIFICAÇÃO
 ═══════════════════════════════════════════════════════════════
-• Produto (1013956, multiselect):
-  - Gestão de Tráfego (1284087), Estruturação Tática (1287537)
-  - GSA (1292087), Playbook de Vendas (1291635)
-• Valor mensal (1016391, monetary) → Valor do contrato mensal
-• Valor de Competencia ARR (1024619, monetary) → Valor anual
+• Segmento (1014388, select) → Use vorp_listar_campos_customizados
+• Faturamento Mensal (1016311, select) → Use vorp_listar_campos_customizados
+• Dor (1024463, text) → Texto livre
 
 ═══════════════════════════════════════════════════════════════
-🏢 DADOS DA EMPRESA
+📦 PRODUTO
 ═══════════════════════════════════════════════════════════════
-• Nome fantasia (1016375, text)
-• CNPJ (1016377, text)
-• Nome completo sócio adm (1016397, text)
-• CPF sócio adm (1016399, text)
-• Faturamento Mensal (1016311, select):
-  - Abaixo de 50 mil (1283555), Entre 50 e 100 mil (1283557)
-  - Entre 100 e 300 mil (1283559), Entre 300 e 500 mil (1283561)
-  - Acima de 500 mil (1283563)
-• Faturamento Real (1017101, select)
-• Margem de Lucro (1019625, text) → Ex: "70%"
-• Cargo (1019611, select):
-  - Proprietário/sócio (1286797), Diretor (1286799)
-  - Gerente/supervisor (1286801), Operacional (1286803), Vendedor (1286805)
-• Perfil do Steakholder (1019615, multiselect):
-  - Dominante (1286819), Influente (1286821), Estável (1286823), Conforme (1286825)
-
-═══════════════════════════════════════════════════════════════
-✅ QUALIFICAÇÃO BOOLEANS
-═══════════════════════════════════════════════════════════════
-• Tem time comercial? (1018827): Sim (1286021), Não (1286023)
-• Tem CRM? (1018829): Sim (1286025), Não (1286027)
-• Pode ter Upsell? (1018831): Sim (1286029), Não (1286031)
-• Problemas Finaceiros? (1018833): Sim (1286033), Não (1286035)
-• Tem ERP? (1019617): Sim (1286827), Não (1286829)
-
-═══════════════════════════════════════════════════════════════
-💰 FINANCEIRO E CONTRATO
-═══════════════════════════════════════════════════════════════
-• Responsável financeiro (1016385, text)
-• Email do financeiro (1016387, text)
-• Telefone do financeiro (1016389, text)
-• Primeiro pagamento (1016381, date) → Unix timestamp
-• Início do projeto (1016379, date) → Unix timestamp
-• Dia da recorrência de pagamento (1016383, numeric) → Ex: 15
-• Alguma observação? (1016401, textarea)
-• UUID Contrato (1016665, text)
-• Contrato Assinado (1024711, text) → URL do contrato assinado
+• Produto (1013956, multiselect) → Use vorp_listar_campos_customizados
 
 ═══════════════════════════════════════════════════════════════
 💡 COMO USAR:
 ═══════════════════════════════════════════════════════════════
-Para text/textarea/url: { field_id: ID, values: [{ value: "texto" }] }
-Para date/date_time:    { field_id: ID, values: [{ value: UNIX_TIMESTAMP }] }
-Para select:            { field_id: ID, values: [{ enum_id: ENUM_ID }] }
-Para multiselect:       { field_id: ID, values: [{ enum_id: ID1 }, { enum_id: ID2 }] }
-Para monetary/numeric:  { field_id: ID, values: [{ value: "1000" }] }
-
-⚡ EXEMPLO - Reunião amanhã às 15h no Google Meet:
-custom_fields_values: [
-  { field_id: 1012642, values: [{ value: 1766149200 }] },  // Data e hora
-  { field_id: 1012648, values: [{ value: "https://meet.google.com/xxx" }] },
-  { field_id: 1019551, values: [{ enum_id: 1286683 }] }   // Temperatura: Quente
-]`;
+Campos texto:    { field_id: ID, values: [{ value: "texto" }] }
+Campos data:     { field_id: ID, values: [{ value: UNIX_TIMESTAMP }] }
+Campos select:   { field_id: ID, values: [{ enum_id: ENUM_ID }] }  ← Obter enum_id via vorp_listar_campos_customizados!
+Campos monetary: { field_id: ID, values: [{ value: "1000" }] }`;
   
   return info;
 }
@@ -518,21 +455,26 @@ Atualiza a etapa de um lead dentro do processo comercial Vorp. Essencial para:
       name: "vorp_atualizar_lead",
       description: `✏️ ATUALIZA DADOS DE UM LEAD VORP
 
-Atualiza campos de um lead (nome, valor, campos customizados).
+Atualiza campos nativos e customizados de um lead.
 
-OBRIGATORIO: Use vorp_listar_campos_customizados ANTES para obter field_id e enum_id corretos!
+═══════════════════════════════════════════════════════════════
+📌 CAMPOS NATIVOS (usar diretamente):
+═══════════════════════════════════════════════════════════════
+• name → Nome do lead
+• price → Valor em reais (ex: 15000)
+• status_id → Etapa do funil (use vorp_listar_etapas_funil)
+• responsible_user_id → Responsável (use vorp_listar_vendedores)
 
-Formato para custom_fields_values:
-- Campos texto: { field_id: ID, values: [{ value: "texto" }] }
-- Campos select: { field_id: ID, values: [{ enum_id: ID_DA_OPCAO }] }
-- Campos multiselect: { field_id: ID, values: [{ enum_id: ID1 }, { enum_id: ID2 }] }
-- Campos data: { field_id: ID, values: [{ value: UNIX_TIMESTAMP }] }
+═══════════════════════════════════════════════════════════════
+📋 CAMPOS CUSTOMIZADOS (usar custom_fields_values):
+═══════════════════════════════════════════════════════════════
+⚠️ Use vorp_listar_campos_customizados ANTES para obter field_id e enum_id!
 
-Exemplo completo - definir faturamento e origem:
-custom_fields_values: [
-  { field_id: 1016311, values: [{ enum_id: 1283559 }] },
-  { field_id: 1013670, values: [{ enum_id: ID_DO_CANAL }] }
-]${customFieldsInfo}`,
+Formato:
+- Texto: { field_id: ID, values: [{ value: "texto" }] }
+- Select: { field_id: ID, values: [{ enum_id: ID_OPCAO }] }
+- Data: { field_id: ID, values: [{ value: UNIX_TIMESTAMP }] }
+${customFieldsInfo}`,
       inputSchema: {
         type: "object",
         properties: {
@@ -552,24 +494,29 @@ custom_fields_values: [
             type: "number", 
             description: "ID da nova etapa (use vorp_mover_lead para mudanças de funil)" 
           },
+          responsible_user_id: { 
+            type: "number", 
+            description: "ID do usuário responsável pelo lead (obtenha com vorp_listar_vendedores)" 
+          },
           custom_fields_values: { 
             type: "array", 
-            description: "Campos customizados: [{field_id: 123, values: [{value: 'texto'}]}]. Para campos select/multiselect use enum_id ao invés de value.",
+            description: "Campos customizados. Use vorp_listar_campos_customizados para obter field_id e enum_id corretos!",
             items: {
               type: "object",
               properties: {
-                field_id: { type: "number" },
+                field_id: { type: "number", description: "ID do campo customizado" },
                 values: { 
                   type: "array",
                   items: {
                     type: "object",
                     properties: {
-                      value: { type: "string" },
-                      enum_id: { type: "number" },
+                      value: { description: "Valor para campos texto, data (timestamp), monetary" },
+                      enum_id: { type: "number", description: "ID da opção para campos select/multiselect" },
                     },
                   },
                 },
               },
+              required: ["field_id", "values"],
             },
           },
         },
@@ -886,6 +833,50 @@ Busca contatos (pessoas) independente dos leads. Um contato pode estar vinculado
       },
     },
 
+    // ========== FERRAMENTA: ATUALIZAR CONTATO ==========
+    {
+      name: "vorp_atualizar_contato",
+      description: `✏️ ATUALIZA DADOS DE UM CONTATO
+
+Atualiza informações de um contato (pessoa) no CRM. Use para:
+- Adicionar ou atualizar email de um contato
+- Adicionar ou atualizar telefone de um contato
+- Corrigir nome do contato
+
+⚠️ IMPORTANTE: Contatos são entidades separadas dos leads! 
+Para atualizar o email/telefone de uma pessoa vinculada a um lead, você precisa:
+1. Buscar o lead com vorp_buscar_lead_por_id para ver os contatos vinculados
+2. Usar esta ferramenta com o contact_id do contato
+
+💡 DICA: Use vorp_listar_contatos para encontrar o contact_id pelo nome ou telefone.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          contact_id: { 
+            type: "number", 
+            description: "ID do contato a ser atualizado (obtenha com vorp_listar_contatos ou vorp_buscar_lead_por_id)" 
+          },
+          first_name: { 
+            type: "string", 
+            description: "Primeiro nome do contato" 
+          },
+          last_name: { 
+            type: "string", 
+            description: "Sobrenome do contato" 
+          },
+          phone: { 
+            type: "string", 
+            description: "Telefone do contato (formato: +5585999991234)" 
+          },
+          email: { 
+            type: "string", 
+            description: "Email do contato" 
+          },
+        },
+        required: ["contact_id"],
+      },
+    },
+
     // ========== FERRAMENTAS DA PLANILHA DE EVENTOS ==========
     // A planilha é a fonte de verdade para etapas pós-agendamento
 
@@ -1073,6 +1064,7 @@ const toolNames = [
   "vorp_listar_vendedores",
   "vorp_listar_campos_customizados",
   "vorp_listar_contatos",
+  "vorp_atualizar_contato",
   // Ferramentas da Planilha (fonte de verdade pós-agendamento)
   "vorp_planilha_listar_eventos",
   "vorp_planilha_eventos_lead",
@@ -1286,6 +1278,7 @@ const toolHandlers: Record<string, ToolHandler> = {
       name?: string;
       price?: number;
       status_id?: number;
+      responsible_user_id?: number;
       custom_fields_values?: Array<{ field_id: number; values: Array<{ value: string | number | boolean; enum_id?: number }> }>;
     }>('vorp_atualizar_lead', params);
     
@@ -1293,12 +1286,13 @@ const toolHandlers: Record<string, ToolHandler> = {
       throw new Error(`Parâmetros inválidos: ${validated.error}`);
     }
     
-    const { lead_id, name, price, status_id, custom_fields_values } = validated.data;
+    const { lead_id, name, price, status_id, responsible_user_id, custom_fields_values } = validated.data;
     
     const body: LeadUpdateRequest = {};
     if (name) body.name = name;
     if (price !== undefined) body.price = price;
     if (status_id) body.status_id = status_id;
+    if (responsible_user_id) body.responsible_user_id = responsible_user_id;
     if (custom_fields_values) body.custom_fields_values = custom_fields_values as any;
 
     const result = await client.patch<Lead>(`/leads/${lead_id}`, body);
@@ -1522,10 +1516,25 @@ const toolHandlers: Record<string, ToolHandler> = {
       }
     }
     
+    // Extrair Valor de Competência ARR (1024619) - valor total do contrato
+    const valorARRField = lead.custom_fields_values?.find(f => f.field_id === 1024619);
+    const valorARR = valorARRField?.values?.[0]?.value 
+      ? parseFloat(String(valorARRField.values[0].value)) 
+      : null;
+    
     return {
       id: lead.id,
       name: lead.name,
-      price: lead.price,
+      
+      // Valores com observações
+      valor_venda: lead.price,
+      valor_venda_formatado: lead.price ? lead.price.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : null,
+      valor_venda_obs: "Valor pago no ato do fechamento (price)",
+      
+      valor_contrato: valorARR,
+      valor_contrato_formatado: valorARR ? valorARR.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : null,
+      valor_contrato_obs: "Valor total do contrato (Valor de Competência ARR)",
+      
       funil: funnelName,
       etapa: stageName,
       status_id: lead.status_id,
@@ -1650,13 +1659,22 @@ const toolHandlers: Record<string, ToolHandler> = {
         };
       }
 
+      // Extrair Valor de Competência ARR (1024619) - valor total do contrato
+      const valorARRField = lead.custom_fields_values?.find(f => f.field_id === 1024619);
+      const valorARR = valorARRField?.values?.[0]?.value 
+        ? parseFloat(String(valorARRField.values[0].value)) 
+        : null;
+
       return {
         id: lead.id,
         name: lead.name,
         funil: pipelineToFunnel.get(lead.pipeline_id) || 'Desconhecido',
         pipeline_id: lead.pipeline_id,
         status_id: lead.status_id,
-        price: lead.price,
+        valor_venda: lead.price,
+        valor_venda_obs: "Valor pago no ato (price)",
+        valor_contrato: valorARR,
+        valor_contrato_obs: "Valor total do contrato (ARR)",
         contato: contactInfo,
         updated_at: new Date(lead.updated_at * 1000).toLocaleString('pt-BR'),
       };
@@ -1820,6 +1838,72 @@ const toolHandlers: Record<string, ToolHandler> = {
           email: emailField?.values?.[0]?.value || null,
         };
       }),
+    };
+  },
+
+  // Atualizar contato
+  vorp_atualizar_contato: async (params, client) => {
+    const validated = validateToolParams<{
+      contact_id: number;
+      first_name?: string;
+      last_name?: string;
+      phone?: string;
+      email?: string;
+    }>('vorp_atualizar_contato', params);
+    
+    if (!validated.success) {
+      throw new Error(`Parâmetros inválidos: ${validated.error}`);
+    }
+    
+    const { contact_id, first_name, last_name, phone, email } = validated.data;
+    
+    // Montar payload de atualização
+    const updatePayload: any = {};
+    
+    if (first_name) updatePayload.first_name = first_name;
+    if (last_name) updatePayload.last_name = last_name;
+    
+    // Campos customizados (telefone e email são campos especiais no Kommo)
+    const customFields: any[] = [];
+    
+    if (phone) {
+      customFields.push({
+        field_code: "PHONE",
+        values: [{ value: phone, enum_code: "WORK" }]
+      });
+    }
+    
+    if (email) {
+      customFields.push({
+        field_code: "EMAIL",
+        values: [{ value: email, enum_code: "WORK" }]
+      });
+    }
+    
+    if (customFields.length > 0) {
+      updatePayload.custom_fields_values = customFields;
+    }
+    
+    // Verificar se há algo para atualizar
+    if (Object.keys(updatePayload).length === 0) {
+      throw new Error("Nenhum campo para atualizar. Informe pelo menos um: first_name, last_name, phone ou email");
+    }
+    
+    // Executar atualização via PATCH
+    const response = await client.patch<ContactsListResponse>("/contacts", [{ id: contact_id, ...updatePayload }]);
+    
+    const updatedContact = response?._embedded?.contacts?.[0];
+    
+    return {
+      sucesso: true,
+      message: `Contato ${contact_id} atualizado com sucesso`,
+      contato: {
+        id: contact_id,
+        first_name: first_name || "(não alterado)",
+        last_name: last_name || "(não alterado)",
+        phone: phone || "(não alterado)",
+        email: email || "(não alterado)",
+      },
     };
   },
 
@@ -2030,48 +2114,51 @@ const toolHandlers: Record<string, ToolHandler> = {
 // Formatar evento da planilha para resposta
 function formatEventoParaResposta(evento: PlanilhaEvento) {
   return {
-    id_evento: evento.id_evento,
-    id_lead: evento.id_lead,
+    // Identificação principal
     nome_lead: evento.nome_lead,
-    status: evento.status_agendamento,
-    tipo_evento: evento.tipo_evento,
-    pipeline: evento.pipeline,
+    id_lead: evento.id_lead,
     
     // Responsáveis
     sdr_responsavel: evento.sdr_responsavel,
     closer_responsavel: evento.closer_responsavel,
     
-    // Datas importantes
-    data_reuniao_agendada: evento.data_reuniao_agendada,
+    // Origem e contexto
+    origem_lead: evento.origem_lead,
+    produto: evento.produto,
+    pipeline: evento.pipeline,
+    
+    // Evento
+    tipo_evento: evento.tipo_evento,
+    status: evento.status_agendamento,
     data_evento: evento.data_evento,
-    data_reuniao_realizada: evento.data_registro_reuniao_realizada,
-    data_proposta: evento.data_registro_proposta_enviada,
-    data_contrato: evento.data_registro_contrato_enviado,
-    data_venda: evento.data_registro_venda,
-    data_perdido: evento.data_registro_perdido,
+    data_reuniao_agendada: evento.data_reuniao_agendada,
     
     // Valores
     valor_venda: evento.valor_venda,
     valor_venda_formatado: evento.valor_venda ? formatarMoeda(evento.valor_venda) : null,
+    valor_venda_obs: "Valor pago no ato do fechamento",
     valor_contrato: evento.valor_contrato,
     valor_contrato_formatado: evento.valor_contrato ? formatarMoeda(evento.valor_contrato) : null,
-    produto: evento.produto,
-    motivo_perdido: evento.motivo_perdido,
+    valor_contrato_obs: "Valor total do contrato",
     
-    // Contato
-    contato: {
+    // Datas de registro
+    data_reuniao_realizada: evento.data_registro_reuniao_realizada || null,
+    data_proposta: evento.data_registro_proposta_enviada || null,
+    data_contrato: evento.data_registro_contrato_enviado || null,
+    data_venda: evento.data_registro_venda || null,
+    data_perdido: evento.data_registro_perdido || null,
+    motivo_perdido: evento.motivo_perdido || null,
+    
+    // Contato (resumido)
+    contato: evento.nome_contato ? {
       nome: evento.nome_contato,
       telefone: evento.telefone_contato,
       email: evento.email_contato,
-      cargo: evento.cargo_contato,
-    },
+    } : null,
     
-    // Origem
-    origem: evento.origem_lead,
-    canal_agendamento: evento.canal_agendamento,
-    
-    // URL para acesso rápido no Kommo
+    // Links
     url_lead: evento.url_lead,
+    id_evento: evento.id_evento,
   };
 }
 
