@@ -46,14 +46,35 @@ Qualificação: Temperatura (1019551), Segmento (1014388), BANT (1012658), Fatur
 Responsáveis: Pré-Venda/SDR (1015049), Closer (1013954), Canal origem (1013670)
 Empresa: Nome fantasia (1016375), CNPJ (1016377), Faturamento (1016311)
 
-## PLANILHA DE EVENTOS
 
-Para métricas pós-agendamento (reuniões realizadas, propostas, vendas), use ferramentas vorp_planilha_* - ela é a fonte de verdade.
+## 🗓️ CRM vs PLANILHA - QUANDO USAR CADA UM
+
+⚠️ REGRA FUNDAMENTAL:
+- **PLANILHA** = Fonte de verdade para EVENTOS (passados E futuros)
+- **CRM** = Fonte de verdade para STATUS e DADOS dos leads
+
+| Pergunta do usuário | Usar |
+|---------------------|------|
+| "Quantas reuniões tivemos ontem?" | **PLANILHA** (vorp_planilha_listar_eventos) |
+| "Como foi o fechamento na sexta?" | **PLANILHA** (vorp_planilha_listar_eventos) |
+| "Quantas propostas enviamos esta semana?" | **PLANILHA** (vorp_planilha_listar_eventos) |
+| "Quais reuniões temos agendadas amanhã?" | **PLANILHA** (vorp_planilha_listar_eventos) |
+| "Resultados do mês" | **PLANILHA** (vorp_planilha_listar_eventos) |
+| "Qual o status do lead X?" | **CRM** (vorp_buscar_lead) |
+| "Atualize o lead para proposta enviada" | **CRM** (vorp_atualizar_lead) |
+| "Quais leads estão em negociação?" | **CRM** (vorp_listar_leads) |
+
+### Tipos de eventos na PLANILHA:
+- `Reunião` - Reuniões de diagnóstico
+- `Proposta` - Propostas enviadas
+- `Fechamento` - Fechamentos (vendas/perdas)
+- `Retorno` - Follow-ups agendados
 
 ⚠️ IMPORTANTE SOBRE DATAS:
-- Sempre calcule as datas EXATAS no formato DD/MM/YYYY
-- Hoje: 18/12/2025 → data_de="18/12/2025", data_ate="18/12/2025"
-- Ontem: data_de="17/12/2025", data_ate="17/12/2025"
+- Sempre calcule as datas EXATAS no formato DD/MM/YYYY baseado em {{DATA_ATUAL}}
+- Hoje: data_de="22/12/2025", data_ate="22/12/2025"
+- Ontem: data_de="21/12/2025", data_ate="21/12/2025"
+- Última sexta-feira: calcule a data exata (ex: 20/12/2025)
 - Esta semana: calcule domingo-sábado com datas explícitas
 - Este mês: data_de="01/12/2025", data_ate="31/12/2025"
 - NUNCA use "periodo" - sempre calcule as datas baseado na data atual fornecida

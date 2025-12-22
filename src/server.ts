@@ -882,37 +882,38 @@ Para atualizar o email/telefone de uma pessoa vinculada a um lead, você precisa
 
     {
       name: "vorp_planilha_listar_eventos",
-      description: `📊 LISTA EVENTOS DA PLANILHA VORP (FONTE DE VERDADE PÓS-AGENDAMENTO)
+      description: `📊 PLANILHA DE EVENTOS - FONTE DE VERDADE PARA MÉTRICAS COMERCIAIS
 
-⚠️ IMPORTANTE: Para consultas de etapas pós-agendamento (reuniões agendadas, realizadas, propostas, contratos, vendas), USE ESTA FERRAMENTA ao invés de buscar no Kommo!
+🚨 OBRIGATÓRIO USAR ESTA FERRAMENTA QUANDO O USUÁRIO PERGUNTAR:
+- "Como foi o fechamento?" → Use tipo_evento="Venda realizada"
+- "Quantas vendas/fechamentos?" → Use tipo_evento="Venda realizada"
+- "Quantas reuniões realizadas?" → Use tipo_evento="Reunião Realizada"
+- "Quantas propostas enviadas?" → Use tipo_evento="Proposta enviada"
+- "Quantos agendamentos?" → Use tipo_evento="Agendamento"
+- "Resultados da semana/mês" → Use esta ferramenta COM as datas
+- "Reuniões agendadas para amanhã" → Use data_reuniao_de/data_reuniao_ate
 
-A Planilha de Eventos é a fonte de verdade para:
-- Reuniões agendadas e realizadas
-- Propostas enviadas
-- Contratos enviados
-- Vendas fechadas
-- Leads perdidos pós-reunião
+⚠️ NÃO USE O CRM (vorp_listar_leads) PARA MÉTRICAS! A planilha é a fonte correta.
 
-📋 FILTROS DISPONÍVEIS:
-- tipo_evento: Agendamento, Reunião Realizada, Proposta enviada, Contrato enviado, Venda realizada
-- pipeline: SDR, BDR, CLOSERS ou MATCH_SALES
-- sdr_responsavel/closer_responsavel: Nome do responsável
-- data_de/data_ate: Filtra pela "Data do evento" (quando aconteceu)
-- data_reuniao_de/data_reuniao_ate: Filtra pela "Data da reunião agendada" (quando vai acontecer)
-- lead_id: Buscar eventos de um lead específico
+📋 MAPEAMENTO DE TERMOS:
+- "fechamento" / "vendas" / "ganhos" → tipo_evento="Venda realizada"
+- "reunião" / "call" / "meet" → tipo_evento="Reunião Realizada"
+- "proposta" / "orçamento" → tipo_evento="Proposta enviada"
+- "contrato" → tipo_evento="Contrato enviado"
+- "agendamento" / "marcação" → tipo_evento="Agendamento"
 
-📅 PARA REUNIÕES FUTURAS: Use data_reuniao_de e data_reuniao_ate
-Exemplo "reuniões agendadas para amanhã": tipo_evento="Agendamento", data_reuniao_de="19/12/2025", data_reuniao_ate="19/12/2025"
+📅 FILTROS DE DATA:
+- data_de/data_ate: Para eventos que JÁ ACONTECERAM (passado)
+- data_reuniao_de/data_reuniao_ate: Para reuniões FUTURAS (agendadas)
 
-📅 PARA EVENTOS PASSADOS: Use data_de e data_ate
-Exemplo "agendamentos de ontem": tipo_evento="Agendamento", data_de="17/12/2025", data_ate="17/12/2025"`,
+Exemplo "fechamentos da última sexta": tipo_evento="Venda realizada", data_de="20/12/2025", data_ate="20/12/2025"`,
       inputSchema: {
         type: "object",
         properties: {
           tipo_evento: { 
             type: "string",
             enum: ["Agendamento", "Reunião Realizada", "Proposta enviada", "Contrato enviado", "Venda realizada"],
-            description: "Tipo do evento que aconteceu" 
+            description: "Tipo do evento. Para 'fechamento' use 'Venda realizada'." 
           },
           pipeline: { 
             type: "string", 
